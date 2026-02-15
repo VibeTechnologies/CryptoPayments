@@ -1,32 +1,54 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
+import { createHmac } from "node:crypto";
 import { loadConfig, type ChainId, type TokenId, TOKEN_ADDRESSES } from "./config.js";
-import { createDB, insertPayment, getPaymentById, getPaymentByTx, getPaymentsByUser, markPaymentVerified, markPaymentFailed } from "./db.js";
+import { createDB, type DB, insertPayment, getPaymentById, getPaymentByTx, getPaymentsByUser, markPaymentVerified, markPaymentFailed } from "./db.js";
 import { verifyTransfer, resolveplan } from "./verify.js";
+import { verifyTelegramInitData } from "./telegram.js";
 
 const config = loadConfig();
 const db = createDB(config.databaseUrl);
 const app = new Hono();
 
-// ── Static files (payment page) ──────────────────────────────────────
+// ── Middleware ────────────────────────────────────────────────────────
 
-app.use("/static/*", serveStatic({ root: "./" }));
+app.use("/api/*", cors({ origin: "*" }));
 
-// ── Payment page ─────────────────────────────────────────────────────
-
-app.get("/", (c) => {
-  // Query params: idtype=tg|email, uid=<value>, plan=starter|pro|max (optional)
-  // Serve the HTML page; frontend reads query params
-  return c.html(paymentPageHtml());
+app.use("*", async (c, next) => {
+  const start = Date.now();
+  await next();
+  const ms = Date.now() - start;
+  console.log(`${c.req.method} ${c.req.path} ${c.res.status} ${ms}ms`);
 });
 
-// ── API routes ───────────────────────────────────────────────────────
+// ── Health ────────────────────────────────────────────────────────────
+
+app.get("/api/health", (c) =>
+  c.json({ ok: true, chains: ["base", "eth", "ton", "sol"], tokens: ["usdt", "usdc"] })
+);
+
+// ── Public config (wallet addresses, prices) ─────────────────────────
+
+app.get("/api/config", (c) => {
+  return c.json({
+    wallets: config.wallets,
+    prices: config.prices,
+    tokens: TOKEN_ADDRESSES,
+    chains: ["base", "eth", "ton", "sol"],
+  });
+});
+
+// ── Submit tx hash for verification ──────────────────────────────────
 
 /**
  * POST /api/payment
- * Submit a transaction hash for verification.
- * Body: { txHash, chainId, token, idType, uid }
+ * Submit a transaction hash for on-chain verification.
+ *
+ * Body: { txHash, chainId, token, idType, uid, plan?, callbackUrl?, initData?, apiKey? }
+ *
+ * Auth: either Telegram initData or shared apiKey (or neither for open mode).
  */
 app.post("/api/payment", async (c) => {
   const body = await c.req.json<{
@@ -35,40 +57,67 @@ app.post("/api/payment", async (c) => {
     token: TokenId;
     idType: "tg" | "email";
     uid: string;
+    plan?: string;
+    callbackUrl?: string;
+    initData?: string;
+    apiKey?: string;
   }>();
 
-  // Validate inputs
-  if (!body.txHash || !body.chainId || !body.idType || !body.uid) {
-    return c.json({ error: "Missing required fields: txHash, chainId, idType, uid" }, 400);
+  // ── Auth (optional but recommended) ──
+  if (body.initData && config.telegramBotToken) {
+    const result = verifyTelegramInitData(body.initData, config.telegramBotToken);
+    if (!result.valid) {
+      return c.json({ error: "Invalid Telegram initData" }, 401);
+    }
+    // Override uid with verified Telegram user ID
+    if (result.user) {
+      body.idType = "tg";
+      body.uid = String(result.user.id);
+    }
+  } else if (body.apiKey) {
+    if (!config.apiKey || body.apiKey !== config.apiKey) {
+      return c.json({ error: "Invalid API key" }, 401);
+    }
   }
 
-  const validChains: ChainId[] = ["base", "eth", "ton", "sol"];
-  if (!validChains.includes(body.chainId)) {
-    return c.json({ error: `Invalid chainId. Must be one of: ${validChains.join(", ")}` }, 400);
+  // ── Validate inputs ──
+  if (!body.txHash || typeof body.txHash !== "string") {
+    return c.json({ error: "txHash is required" }, 400);
   }
-
-  if (body.idType !== "tg" && body.idType !== "email") {
+  if (!body.chainId || !["base", "eth", "ton", "sol"].includes(body.chainId)) {
+    return c.json({ error: "chainId must be base, eth, ton, or sol" }, 400);
+  }
+  if (!body.idType || !["tg", "email"].includes(body.idType)) {
     return c.json({ error: "idType must be 'tg' or 'email'" }, 400);
   }
+  if (!body.uid) {
+    return c.json({ error: "uid is required" }, 400);
+  }
 
-  // Check for duplicate
+  const token = body.token || "usdt";
+  if (!["usdt", "usdc"].includes(token)) {
+    return c.json({ error: "token must be usdt or usdc" }, 400);
+  }
+
+  // ── Duplicate check ──
   const existing = getPaymentByTx(db, body.txHash, body.chainId);
   if (existing) {
     return c.json({ error: "Transaction already submitted", payment: existing }, 409);
   }
 
-  // Insert pending record
+  // ── Insert pending payment ──
   const payment = insertPayment(db, {
     idType: body.idType,
     uid: body.uid,
     txHash: body.txHash,
     chainId: body.chainId,
-    token: body.token || "usdt",
+    token,
     amountRaw: "0",
     amountUsd: 0,
+    planId: body.plan ?? undefined,
   });
 
-  // Verify on-chain (async — we already responded with the record)
+  // ── Verify on-chain ──
   try {
     const result = await verifyTransfer(body.txHash, body.chainId, config);
 
@@ -86,10 +135,18 @@ app.post("/api/payment", async (c) => {
       amountRaw: result.amountRaw,
       amountUsd: result.amountUsd,
       blockNumber: result.blockNumber,
-      planId: planId ?? undefined,
+      planId: planId ?? body.plan ?? undefined,
     });
 
     const verified = getPaymentById(db, payment.id)!;
+
+    // ── Send webhook callback ──
+    if (body.callbackUrl && config.callbackSecret) {
+      sendCallback(body.callbackUrl, verified).catch((err) =>
+        console.error("Callback error:", err)
+      );
+    }
+
     return c.json({ payment: verified });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -98,11 +155,16 @@ app.post("/api/payment", async (c) => {
   }
 });
 
-/**
- * GET /api/payment/:id
- * Check payment status by ID.
- */
+// ── Check payment status (API key required) ─────────────────────────
+
 app.get("/api/payment/:id", (c) => {
+  if (config.apiKey) {
+    const provided = c.req.header("x-api-key") ?? c.req.query("api_key");
+    if (provided !== config.apiKey) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+  }
+
   const id = Number(c.req.param("id"));
   if (Number.isNaN(id)) return c.json({ error: "Invalid payment ID" }, 400);
 
@@ -112,11 +174,16 @@ app.get("/api/payment/:id", (c) => {
   return c.json({ payment });
 });
 
-/**
- * GET /api/payments?idtype=tg&uid=12345
- * List payments for a user.
- */
+// ── User payment history (API key required) ──────────────────────────
+
 app.get("/api/payments", (c) => {
+  if (config.apiKey) {
+    const provided = c.req.header("x-api-key") ?? c.req.query("api_key");
+    if (provided !== config.apiKey) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+  }
+
   const idType = c.req.query("idtype");
   const uid = c.req.query("uid");
 
@@ -128,89 +195,120 @@ app.get("/api/payments", (c) => {
   return c.json({ payments });
 });
 
-/**
- * GET /api/config
- * Return public config (wallet addresses, prices, supported chains).
- */
-app.get("/api/config", (c) => {
-  return c.json({
-    wallets: config.wallets,
-    prices: config.prices,
-    tokens: TOKEN_ADDRESSES,
-    chains: ["base", "eth", "ton", "sol"],
-  });
-});
+// ── Webhook callback ─────────────────────────────────────────────────
 
-// ── Payment Page HTML ────────────────────────────────────────────────
+async function sendCallback(callbackUrl: string, payment: NonNullable<ReturnType<typeof getPaymentById>>): Promise<void> {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const payload = JSON.stringify({
+    event: "payment.verified",
+    payment: {
+      id: payment.id,
+      idType: payment.id_type,
+      uid: payment.uid,
+      plan: payment.plan_id,
+      chain: payment.chain_id,
+      token: payment.token,
+      amountUsd: payment.amount_usd,
+      txHash: payment.tx_hash,
+    },
+    timestamp,
+  });
+
+  const signature = createHmac("sha256", config.callbackSecret)
+    .update(payload)
+    .digest("hex");
+
+  const resp = await fetch(callbackUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Signature": signature,
+      "X-Timestamp": timestamp,
+    },
+    body: payload,
+  });
+
+  if (!resp.ok) {
+    console.error(`Callback to ${callbackUrl} failed: ${resp.status} ${resp.statusText}`);
+  } else {
+    console.log(`Callback sent for payment ${payment.id}`);
+  }
+}
+
+// ── Payment page (Telegram Mini App) ─────────────────────────────────
+
+app.get("/", (c) => c.html(paymentPageHtml()));
+
+// ── Static files ─────────────────────────────────────────────────────
+
+app.use("/*", serveStatic({ root: "./public" }));
+
+// ── Payment page HTML (Telegram Mini App) ────────────────────────────
 
 function paymentPageHtml(): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Pay with Crypto — OpenClaw</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
+    :root {
+      --bg: #0a0a0a;
+      --surface: #141414;
+      --border: #262626;
+      --text: #e5e5e5;
+      --text-dim: #888;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --success: #4ade80;
+      --warning: #fbbf24;
+      --error: #f87171;
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #0a0a0a;
-      color: #e5e5e5;
+      background: var(--bg);
+      color: var(--text);
       min-height: 100vh;
-      display: flex;
-      justify-content: center;
-      align-items: flex-start;
-      padding: 40px 16px;
+      padding: 16px;
     }
-    .container {
-      max-width: 480px;
-      width: 100%;
+    /* Telegram Mini App theme adaptation */
+    body.tg-theme {
+      background: var(--tg-theme-bg-color, var(--bg));
+      color: var(--tg-theme-text-color, var(--text));
     }
-    h1 {
-      font-size: 24px;
-      margin-bottom: 8px;
-      color: #fff;
-    }
-    .subtitle {
-      color: #888;
-      margin-bottom: 32px;
-      font-size: 14px;
-    }
+    .container { max-width: 480px; margin: 0 auto; }
+    h1 { font-size: 22px; margin-bottom: 4px; color: #fff; }
+    .subtitle { color: var(--text-dim); margin-bottom: 24px; font-size: 13px; }
     .step {
-      background: #141414;
-      border: 1px solid #262626;
+      background: var(--surface);
+      border: 1px solid var(--border);
       border-radius: 12px;
-      padding: 20px;
-      margin-bottom: 16px;
+      padding: 16px;
+      margin-bottom: 12px;
     }
     .step-header {
       display: flex;
       align-items: center;
-      gap: 12px;
-      margin-bottom: 16px;
+      gap: 10px;
+      margin-bottom: 12px;
     }
-    .step-number {
-      background: #262626;
-      color: #888;
-      width: 28px;
-      height: 28px;
+    .step-num {
+      background: var(--accent);
+      color: #fff;
+      width: 24px; height: 24px;
       border-radius: 50%;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 13px;
-      font-weight: 600;
+      font-size: 12px;
+      font-weight: 700;
       flex-shrink: 0;
     }
-    .step-number.active { background: #3b82f6; color: #fff; }
-    .step-title { font-size: 16px; font-weight: 600; color: #fff; }
-    label {
-      display: block;
-      font-size: 13px;
-      color: #888;
-      margin-bottom: 6px;
-      margin-top: 12px;
-    }
+    .step-title { font-size: 15px; font-weight: 600; }
+    label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; margin-top: 10px; }
     label:first-of-type { margin-top: 0; }
     select, input[type="text"] {
       width: 100%;
@@ -221,81 +319,75 @@ function paymentPageHtml(): string {
       color: #fff;
       font-size: 14px;
       outline: none;
+      -webkit-appearance: none;
     }
-    select:focus, input[type="text"]:focus {
-      border-color: #3b82f6;
-    }
-    .wallet-address {
+    select:focus, input[type="text"]:focus { border-color: var(--accent); }
+    .wallet-box {
       background: #1a1a1a;
       border: 1px solid #333;
       border-radius: 8px;
-      padding: 12px;
+      padding: 10px 12px;
       font-family: monospace;
-      font-size: 13px;
+      font-size: 12px;
       word-break: break-all;
-      color: #3b82f6;
+      color: var(--accent);
       cursor: pointer;
-      position: relative;
+      transition: border-color 0.2s;
     }
-    .wallet-address:hover { background: #222; }
-    .wallet-address::after {
-      content: 'Click to copy';
-      position: absolute;
-      right: 12px;
-      top: 50%;
-      transform: translateY(-50%);
-      font-size: 11px;
-      color: #666;
-      font-family: sans-serif;
-    }
-    .amount-display {
+    .wallet-box:active { border-color: var(--success); }
+    .copy-hint { font-size: 11px; color: var(--text-dim); margin-top: 4px; text-align: right; }
+    .amount-box {
       text-align: center;
-      padding: 16px;
+      padding: 14px;
       background: #1a1a1a;
       border-radius: 8px;
       border: 1px solid #333;
     }
-    .amount-display .amount {
-      font-size: 32px;
-      font-weight: 700;
-      color: #fff;
-    }
-    .amount-display .token { color: #888; font-size: 14px; }
+    .amount-box .amount { font-size: 28px; font-weight: 700; color: #fff; }
+    .amount-box .token-label { color: var(--text-dim); font-size: 13px; margin-top: 2px; }
     button {
       width: 100%;
       padding: 14px;
-      background: #3b82f6;
+      background: var(--accent);
       color: #fff;
       border: none;
       border-radius: 8px;
       font-size: 15px;
       font-weight: 600;
       cursor: pointer;
-      margin-top: 16px;
+      margin-top: 12px;
+      transition: background 0.2s;
     }
-    button:hover { background: #2563eb; }
-    button:disabled {
-      background: #262626;
-      color: #666;
-      cursor: not-allowed;
-    }
+    button:hover { background: var(--accent-hover); }
+    button:disabled { background: #262626; color: #666; cursor: not-allowed; }
     .status {
-      margin-top: 16px;
-      padding: 12px;
+      margin-top: 12px;
+      padding: 10px 12px;
       border-radius: 8px;
-      font-size: 14px;
+      font-size: 13px;
       display: none;
     }
-    .status.pending { background: #1a1500; border: 1px solid #854d0e; color: #fbbf24; display: block; }
-    .status.verified { background: #001a00; border: 1px solid #166534; color: #4ade80; display: block; }
-    .status.failed { background: #1a0000; border: 1px solid #991b1b; color: #f87171; display: block; }
-    .status.error { background: #1a0000; border: 1px solid #991b1b; color: #f87171; display: block; }
-    .powered-by {
-      text-align: center;
-      margin-top: 24px;
+    .status.pending { background: #1a1500; border: 1px solid #854d0e; color: var(--warning); display: block; }
+    .status.verified { background: #001a00; border: 1px solid #166534; color: var(--success); display: block; }
+    .status.failed, .status.error { background: #1a0000; border: 1px solid #991b1b; color: var(--error); display: block; }
+    .chain-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+    .chain-badge {
+      padding: 6px 12px;
+      border-radius: 20px;
       font-size: 12px;
-      color: #444;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid #333;
+      background: #1a1a1a;
+      color: var(--text-dim);
+      transition: all 0.2s;
     }
+    .chain-badge.active {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    .powered { text-align: center; margin-top: 20px; font-size: 11px; color: #333; }
   </style>
 </head>
 <body>
@@ -306,18 +398,17 @@ function paymentPageHtml(): string {
     <!-- Step 1: Choose chain & token -->
     <div class="step">
       <div class="step-header">
-        <div class="step-number active">1</div>
-        <div class="step-title">Choose payment method</div>
+        <div class="step-num">1</div>
+        <div class="step-title">Choose network</div>
       </div>
-      <label>Blockchain</label>
-      <select id="chainSelect">
-        <option value="base">Base (fastest, lowest fees)</option>
-        <option value="eth">Ethereum</option>
-        <option value="sol">Solana</option>
-        <option value="ton">TON</option>
-      </select>
+      <div class="chain-badges" id="chainBadges">
+        <div class="chain-badge active" data-chain="base" onclick="selectChain('base')">Base</div>
+        <div class="chain-badge" data-chain="eth" onclick="selectChain('eth')">Ethereum</div>
+        <div class="chain-badge" data-chain="sol" onclick="selectChain('sol')">Solana</div>
+        <div class="chain-badge" data-chain="ton" onclick="selectChain('ton')">TON</div>
+      </div>
       <label>Token</label>
-      <select id="tokenSelect">
+      <select id="tokenSelect" onchange="updateDisplay()">
         <option value="usdc">USDC</option>
         <option value="usdt">USDT</option>
       </select>
@@ -326,83 +417,132 @@ function paymentPageHtml(): string {
     <!-- Step 2: Send payment -->
     <div class="step">
       <div class="step-header">
-        <div class="step-number active">2</div>
+        <div class="step-num">2</div>
         <div class="step-title">Send payment</div>
       </div>
-      <div class="amount-display">
+      <div class="amount-box">
         <div class="amount" id="amountDisplay">$10.00</div>
-        <div class="token" id="tokenDisplay">USDC on Base</div>
+        <div class="token-label" id="tokenDisplay">USDC on Base</div>
       </div>
-      <label>Send to this address</label>
-      <div class="wallet-address" id="walletAddress" onclick="copyAddress()">Loading...</div>
+      <label>Send exactly this amount to</label>
+      <div class="wallet-box" id="walletAddress" onclick="copyAddress()">Loading...</div>
+      <div class="copy-hint" id="copyHint">Tap to copy</div>
     </div>
 
     <!-- Step 3: Submit tx hash -->
     <div class="step">
       <div class="step-header">
-        <div class="step-number active">3</div>
+        <div class="step-num">3</div>
         <div class="step-title">Confirm payment</div>
       </div>
-      <label>Transaction hash</label>
-      <input type="text" id="txHashInput" placeholder="0x... or paste your transaction hash">
+      <label>Paste your transaction hash</label>
+      <input type="text" id="txHashInput" placeholder="0x... or transaction signature">
       <button id="submitBtn" onclick="submitPayment()">Verify Payment</button>
       <div class="status" id="statusMsg"></div>
     </div>
 
-    <p class="powered-by">Powered by OpenClaw</p>
+    <p class="powered">Powered by OpenClaw</p>
   </div>
 
   <script>
-    // Read query params
-    const params = new URLSearchParams(window.location.search);
-    const idType = params.get('idtype') || 'tg';
-    const uid = params.get('uid') || '';
-    const planParam = params.get('plan') || 'starter';
+    // ── Telegram Mini App integration ──
+    const tg = window.Telegram?.WebApp;
+    let initData = '';
+    let tgUserId = '';
 
+    if (tg) {
+      tg.ready();
+      tg.expand();
+      document.body.classList.add('tg-theme');
+      initData = tg.initData || '';
+
+      if (tg.initDataUnsafe?.user) {
+        tgUserId = String(tg.initDataUnsafe.user.id);
+      }
+
+      // Use Telegram theme colors
+      if (tg.themeParams) {
+        const t = tg.themeParams;
+        if (t.bg_color) document.documentElement.style.setProperty('--bg', t.bg_color);
+        if (t.secondary_bg_color) document.documentElement.style.setProperty('--surface', t.secondary_bg_color);
+        if (t.text_color) document.documentElement.style.setProperty('--text', t.text_color);
+        if (t.hint_color) document.documentElement.style.setProperty('--text-dim', t.hint_color);
+        if (t.button_color) document.documentElement.style.setProperty('--accent', t.button_color);
+      }
+    }
+
+    // ── Query params (from bot-generated link) ──
+    const params = new URLSearchParams(window.location.search);
+    // Also check Telegram startapp param
+    const startParam = tg?.initDataUnsafe?.start_param || '';
+    let idType = params.get('idtype') || 'tg';
+    let uid = params.get('uid') || tgUserId || '';
+    let planParam = params.get('plan') || 'starter';
+    let callbackUrl = params.get('callback') || '';
+
+    // Parse startapp param: format "plan_uid" e.g. "pro_123456789"
+    if (startParam && !uid) {
+      const parts = startParam.split('_');
+      if (parts.length >= 2) {
+        planParam = parts[0];
+        uid = parts.slice(1).join('_');
+        idType = 'tg';
+      }
+    }
+
+    let selectedChain = 'base';
     let appConfig = null;
 
-    // Init
     async function init() {
+      const label = idType === 'tg'
+        ? (tg?.initDataUnsafe?.user?.first_name || 'Telegram user ' + uid)
+        : uid;
+      document.getElementById('userInfo').textContent = uid
+        ? 'Paying as ' + label + ' — ' + planParam.charAt(0).toUpperCase() + planParam.slice(1) + ' plan'
+        : 'Error: No user identified';
+
       if (!uid) {
-        document.getElementById('userInfo').textContent = 'Error: No user ID provided';
         document.getElementById('submitBtn').disabled = true;
         return;
       }
 
-      const label = idType === 'tg' ? 'Telegram ID: ' + uid : uid;
-      document.getElementById('userInfo').textContent = 'Paying as ' + label;
+      try {
+        const resp = await fetch('/api/config');
+        appConfig = await resp.json();
+        updateDisplay();
+      } catch (err) {
+        document.getElementById('userInfo').textContent = 'Error loading config';
+      }
+    }
 
-      // Fetch config
-      const resp = await fetch('/api/config');
-      appConfig = await resp.json();
+    function selectChain(chain) {
+      selectedChain = chain;
+      document.querySelectorAll('.chain-badge').forEach(el => {
+        el.classList.toggle('active', el.dataset.chain === chain);
+      });
       updateDisplay();
     }
 
     function updateDisplay() {
       if (!appConfig) return;
-      const chain = document.getElementById('chainSelect').value;
       const token = document.getElementById('tokenSelect').value;
-
-      // Update wallet address
-      const wallet = appConfig.wallets[chain] || 'Not configured';
+      const wallet = appConfig.wallets[selectedChain] || 'Not configured';
       document.getElementById('walletAddress').textContent = wallet;
 
-      // Update amount
       const price = appConfig.prices[planParam] || appConfig.prices.starter;
       document.getElementById('amountDisplay').textContent = '$' + price.toFixed(2);
 
       const chainNames = { base: 'Base', eth: 'Ethereum', sol: 'Solana', ton: 'TON' };
       document.getElementById('tokenDisplay').textContent =
-        token.toUpperCase() + ' on ' + (chainNames[chain] || chain);
+        token.toUpperCase() + ' on ' + (chainNames[selectedChain] || selectedChain);
     }
 
     function copyAddress() {
       const addr = document.getElementById('walletAddress').textContent;
+      if (!addr || addr === 'Not configured' || addr === 'Loading...') return;
       navigator.clipboard.writeText(addr).then(() => {
-        const el = document.getElementById('walletAddress');
-        const original = el.style.borderColor;
-        el.style.borderColor = '#4ade80';
-        setTimeout(() => { el.style.borderColor = original; }, 1000);
+        document.getElementById('copyHint').textContent = 'Copied!';
+        setTimeout(() => { document.getElementById('copyHint').textContent = 'Tap to copy'; }, 1500);
       });
     }
 
@@ -413,38 +553,48 @@ function paymentPageHtml(): string {
         return;
       }
 
-      const chain = document.getElementById('chainSelect').value;
       const token = document.getElementById('tokenSelect').value;
-
       showStatus('pending', 'Verifying transaction on-chain...');
       document.getElementById('submitBtn').disabled = true;
 
       try {
+        const body = {
+          txHash,
+          chainId: selectedChain,
+          token,
+          idType,
+          uid,
+          plan: planParam,
+          callbackUrl: callbackUrl || undefined,
+        };
+
+        // Include initData for Telegram auth
+        if (initData) body.initData = initData;
+
         const resp = await fetch('/api/payment', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            txHash,
-            chainId: chain,
-            token,
-            idType,
-            uid,
-          }),
+          body: JSON.stringify(body),
         });
 
         const data = await resp.json();
 
         if (resp.ok && data.payment?.status === 'verified') {
           const p = data.payment;
+          const planName = p.plan_id ? p.plan_id.charAt(0).toUpperCase() + p.plan_id.slice(1) : '';
           showStatus('verified',
-            'Payment verified! ' +
-            (p.plan_id ? p.plan_id.charAt(0).toUpperCase() + p.plan_id.slice(1) + ' plan' : '$' + p.amount_usd) +
-            ' — ' + p.amount_usd + ' ' + p.token.toUpperCase() +
+            'Payment verified! ' + (planName ? planName + ' plan — ' : '') +
+            p.amount_usd.toFixed(2) + ' ' + p.token.toUpperCase() +
             '. You can close this page.');
+
+          // Close Telegram Mini App after short delay
+          if (tg) {
+            setTimeout(() => tg.close(), 3000);
+          }
         } else if (resp.status === 409) {
           showStatus('error', 'This transaction was already submitted.');
         } else {
-          showStatus('failed', data.error || 'Verification failed. Please check the transaction hash and try again.');
+          showStatus('failed', data.error || 'Verification failed. Check the hash and try again.');
         }
       } catch (err) {
         showStatus('error', 'Network error. Please try again.');
@@ -459,8 +609,6 @@ function paymentPageHtml(): string {
       el.textContent = msg;
     }
 
-    document.getElementById('chainSelect').addEventListener('change', updateDisplay);
-    document.getElementById('tokenSelect').addEventListener('change', updateDisplay);
     init();
   </script>
 </body>
@@ -470,8 +618,7 @@ function paymentPageHtml(): string {
 // ── Start server ─────────────────────────────────────────────────────
 
 console.log(`CryptoPayments server starting on port ${config.port}`);
-serve({
-  fetch: app.fetch,
-  port: config.port,
-});
+serve({ fetch: app.fetch, port: config.port });
 console.log(`CryptoPayments server running at http://localhost:${config.port}`);
+
+export { app, config };

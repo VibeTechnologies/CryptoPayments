@@ -44,7 +44,7 @@ export function loadConfig(): Config {
       base: process.env.RPC_BASE ?? "https://mainnet.base.org",
       eth: process.env.RPC_ETH ?? "https://cloudflare-eth.com",
       sol: process.env.RPC_SOL ?? "https://api.mainnet-beta.solana.com",
-      ton: process.env.RPC_TON ?? "https://toncenter.com/api/v2",
+      ton: process.env.RPC_TON ?? "https://toncenter.com/api/v3",
     },
     prices: {
       starter: Number(process.env.PRICE_STARTER) || 10,

@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crypto-payments
+  labels:
+    app: crypto-payments
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: crypto-payments
+  template:
+    metadata:
+      labels:
+        app: crypto-payments
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: payments
+          image: ghcr.io/vibetechnologies/crypto-payments:latest
+          imagePullPolicy: Always
+          env:
+            - name: PORT
+              value: "3003"
+            - name: DATABASE_URL
+              value: /data/payments.db
+            - name: BASE_URL
+              value: https://pay.oclawbox.com
+            # Receiving wallet addresses
+            - name: WALLET_BASE
+              valueFrom:
+                secretKeyRef:
+                  name: crypto-payments-secret
+                  key: WALLET_BASE
+            - name: WALLET_ETH
+              valueFrom:
+                secretKeyRef:
+                  name: crypto-payments-secret
+                  key: WALLET_ETH
+            - name: WALLET_TON
+              valueFrom:
+                secretKeyRef:
+                  name: crypto-payments-secret
+                  key: WALLET_TON
+            - name: WALLET_SOL
+              valueFrom:
+                secretKeyRef:
+                  name: crypto-payments-secret
+                  key: WALLET_SOL
+            # RPC endpoints (optional — defaults to public endpoints)
+            - name: RPC_BASE
+              valueFrom:
+                secretKeyRef:
+                  name: crypto-payments-secret
+                  key: RPC_BASE
+                  optional: true
+            - name: RPC_ETH
+              valueFrom:
+                secretKeyRef:
+                  name: crypto-payments-secret
+                  key: RPC_ETH
+                  optional: true
+            - name: RPC_SOL
+              valueFrom:
+                secretKeyRef:
+                  name: crypto-payments-secret
+                  key: RPC_SOL
+                  optional: true
+            - name: RPC_TON
+              valueFrom:
+                secretKeyRef:
+                  name: crypto-payments-secret
+                  key: RPC_TON
+                  optional: true
+            # Auth
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: crypto-payments-secret
+                  key: API_KEY
+            - name: CALLBACK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: crypto-payments-secret
+                  key: CALLBACK_SECRET
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-bot-secret
+                  key: TELEGRAM_BOT_TOKEN
+          ports:
+            - name: http
+              containerPort: 3003
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: crypto-payments-data
