@@ -533,7 +533,8 @@ export function createApp(injectedDb?: DB) {
   });
 
   // ── Default payment page (Telegram Mini App) ──────────────────────────────
-
+  // /pay is the canonical path used by the bot's Mini App URL
+  app.get("/pay", (c) => c.html(paymentPageHtml()));
   app.get("/", (c) => c.html(paymentPageHtml()));
 
   return app;
