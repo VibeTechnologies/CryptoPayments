@@ -21,7 +21,7 @@ vi.mock("@/lib/wallets/solana", () => ({
   sendSolanaTransfer: vi.fn(),
 }));
 
-import { fetchConfig, submitPayment } from "@/lib/api";
+import { fetchConfig } from "@/lib/api";
 import PayPage from "@/app/pay/page";
 
 const mockConfig = {
@@ -133,31 +133,6 @@ describe("PayPage", () => {
     expect(screen.getByText("USDT")).toBeInTheDocument();
   });
 
-  it("shows 'or pay manually' divider", async () => {
-    render(<PayPage />);
-    await waitFor(() => {
-      expect(screen.getByText("or pay manually")).toBeInTheDocument();
-    });
-  });
-
-  it("shows wallet address in manual payment section", async () => {
-    render(<PayPage />);
-    await waitFor(() => {
-      expect(screen.getByText("0xBaseWallet")).toBeInTheDocument();
-    });
-  });
-
-  it("switches wallet address when changing chain", async () => {
-    const user = userEvent.setup();
-    render(<PayPage />);
-    await waitFor(() => {
-      expect(screen.getByText("0xBaseWallet")).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByText("Ethereum"));
-    expect(screen.getByText("0xEthWallet")).toBeInTheDocument();
-  });
-
   it("updates amount display when changing chain", async () => {
     const user = userEvent.setup();
     render(<PayPage />);
@@ -178,97 +153,6 @@ describe("PayPage", () => {
 
     await user.click(screen.getByText("USDT"));
     expect(screen.getByText("USDT on Base")).toBeInTheDocument();
-  });
-
-  it("submits payment with manual tx hash", async () => {
-    const user = userEvent.setup();
-    vi.mocked(submitPayment).mockResolvedValue({
-      payment: {
-        id: "pay_1",
-        status: "verified",
-        amount_usd: 10,
-        token: "usdc",
-        chain_id: "base",
-        plan_id: "starter",
-        tx_hash: "0xValidTxHash",
-      },
-    });
-
-    render(<PayPage />);
-    await waitFor(() => {
-      expect(screen.getByText("Pay with Crypto")).toBeInTheDocument();
-    });
-
-    const input = screen.getByPlaceholderText("0x... or transaction signature");
-    await user.type(input, "0xValidTxHash");
-    await user.click(screen.getByText("Verify Payment"));
-
-    await waitFor(() => {
-      expect(submitPayment).toHaveBeenCalledWith(
-        expect.objectContaining({
-          txHash: "0xValidTxHash",
-          chainId: "base",
-          token: "usdc",
-          idType: "tg",
-          uid: "12345",
-          plan: "starter",
-        }),
-      );
-    });
-
-    await waitFor(() => {
-      expect(screen.getByText(/Payment verified/)).toBeInTheDocument();
-    });
-  });
-
-  it("shows error when verification fails", async () => {
-    const user = userEvent.setup();
-    vi.mocked(submitPayment).mockResolvedValue({
-      payment: {
-        id: "pay_1",
-        status: "failed",
-        amount_usd: 0,
-        token: "usdc",
-        chain_id: "base",
-        tx_hash: "0xBadTx",
-      },
-      error: "Transaction not found on chain",
-    });
-
-    render(<PayPage />);
-    await waitFor(() => {
-      expect(screen.getByText("Pay with Crypto")).toBeInTheDocument();
-    });
-
-    const input = screen.getByPlaceholderText("0x... or transaction signature");
-    await user.type(input, "0xBadTx");
-    await user.click(screen.getByText("Verify Payment"));
-
-    await waitFor(() => {
-      expect(screen.getByText("Transaction not found on chain")).toBeInTheDocument();
-    });
-  });
-
-  it("shows duplicate error on 409", async () => {
-    const user = userEvent.setup();
-    vi.mocked(submitPayment).mockRejectedValue(
-      new Error("This transaction was already submitted."),
-    );
-
-    render(<PayPage />);
-    await waitFor(() => {
-      expect(screen.getByText("Pay with Crypto")).toBeInTheDocument();
-    });
-
-    const input = screen.getByPlaceholderText("0x... or transaction signature");
-    await user.type(input, "0xDupe");
-    await user.click(screen.getByText("Verify Payment"));
-
-    await waitFor(() => {
-      expect(
-        screen.getByText("This transaction was already submitted."),
-      ).toBeInTheDocument();
-    });
   });
 
   it("shows footer", async () => {

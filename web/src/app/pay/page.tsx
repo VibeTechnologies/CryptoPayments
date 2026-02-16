@@ -8,13 +8,11 @@ import {
   type TokenId,
   CHAINS,
   TOKENS,
-  EVM_CHAINS,
 } from "@/lib/config";
 import { ChainSelector } from "@/components/chain-selector";
 import { TokenSelector } from "@/components/token-selector";
 import { AmountDisplay } from "@/components/amount-display";
 import { WalletConnect } from "@/components/wallet-connect";
-import { ManualPayment } from "@/components/manual-payment";
 import { StatusMessage, type StatusType } from "@/components/status-message";
 
 // Telegram WebApp types
@@ -55,7 +53,6 @@ export default function PayPage() {
 
   // Payment state
   const [status, setStatus] = useState<{ type: StatusType; message: string } | null>(null);
-  const [txHash, setTxHash] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [verified, setVerified] = useState(false);
 
@@ -116,7 +113,6 @@ export default function PayPage() {
   // Handle wallet transaction completion
   const handleTxSent = useCallback(
     async (hash: string) => {
-      setTxHash(hash);
       setStatus({ type: "pending", message: "Transaction sent. Verifying on-chain..." });
       await doSubmit(hash);
     },
@@ -125,10 +121,9 @@ export default function PayPage() {
   );
 
   // Submit payment for verification
-  async function doSubmit(hash?: string) {
-    const finalHash = hash || txHash;
-    if (!finalHash.trim()) {
-      setStatus({ type: "error", message: "Please enter a transaction hash" });
+  async function doSubmit(hash: string) {
+    if (!hash.trim()) {
+      setStatus({ type: "error", message: "No transaction hash provided" });
       return;
     }
     setSubmitting(true);
@@ -136,7 +131,7 @@ export default function PayPage() {
 
     try {
       const result = await submitPayment({
-        txHash: finalHash.trim(),
+        txHash: hash.trim(),
         chainId: selectedChain,
         token: selectedToken,
         idType,
@@ -255,23 +250,6 @@ export default function PayPage() {
               onTxSent={handleTxSent}
               disabled={verified || submitting}
               onStatus={(type, msg) => setStatus({ type, message: msg })}
-            />
-
-            {/* Divider */}
-            <div className="my-4 flex items-center gap-3">
-              <div className="h-px flex-1 bg-border" />
-              <span className="text-xs text-muted">or pay manually</span>
-              <div className="h-px flex-1 bg-border" />
-            </div>
-
-            {/* Manual: copy address + paste tx hash */}
-            <ManualPayment
-              walletAddress={walletAddress}
-              txHash={txHash}
-              onTxHashChange={setTxHash}
-              onSubmit={() => doSubmit()}
-              disabled={verified || submitting}
-              submitting={submitting}
             />
           </div>
         </section>
