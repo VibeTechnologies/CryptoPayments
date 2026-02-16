@@ -35,17 +35,17 @@ describe("WalletConnect", () => {
     vi.clearAllMocks();
   });
 
-  it("always shows Connect MetaMask button for EVM chains", () => {
+  it("always shows Connect Wallet button for EVM chains", () => {
     vi.mocked(isEvmAvailable).mockReturnValue(false);
     render(<WalletConnect {...defaultProps} chain="base" />);
-    expect(screen.getByText("Connect MetaMask")).toBeInTheDocument();
+    expect(screen.getByText("Connect Wallet")).toBeInTheDocument();
   });
 
-  it("shows install prompt when MetaMask extension is not detected", () => {
+  it("shows install prompt when EVM wallet is not detected", () => {
     vi.mocked(isEvmAvailable).mockReturnValue(false);
     render(<WalletConnect {...defaultProps} chain="base" />);
-    expect(screen.getByText(/MetaMask not detected/i)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Install MetaMask/i })).toHaveAttribute(
+    expect(screen.getByText(/EVM wallet not detected/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Install EVM wallet/i })).toHaveAttribute(
       "href",
       "https://metamask.io/download/",
     );
@@ -57,7 +57,7 @@ describe("WalletConnect", () => {
     const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
 
     render(<WalletConnect {...defaultProps} chain="base" />);
-    await user.click(screen.getByText("Connect MetaMask"));
+    await user.click(screen.getByText("Connect Wallet"));
 
     expect(openSpy).toHaveBeenCalledWith(
       "https://metamask.io/download/",
@@ -67,11 +67,11 @@ describe("WalletConnect", () => {
     openSpy.mockRestore();
   });
 
-  it("does not show install prompt when MetaMask is available", () => {
+  it("does not show install prompt when EVM wallet is available", () => {
     vi.mocked(isEvmAvailable).mockReturnValue(true);
     render(<WalletConnect {...defaultProps} chain="base" />);
-    expect(screen.getByText("Connect MetaMask")).toBeInTheDocument();
-    expect(screen.queryByText(/MetaMask not detected/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Connect Wallet")).toBeInTheDocument();
+    expect(screen.queryByText(/EVM wallet not detected/i)).not.toBeInTheDocument();
   });
 
   it("always shows Connect Phantom button for Solana", () => {
@@ -93,7 +93,7 @@ describe("WalletConnect", () => {
     expect(screen.getByText("Connect TON Wallet")).toBeInTheDocument();
   });
 
-  it("connects MetaMask and shows address on click", async () => {
+  it("connects EVM wallet and shows address on click", async () => {
     const user = userEvent.setup();
     vi.mocked(isEvmAvailable).mockReturnValue(true);
     vi.mocked(connectEvm).mockResolvedValue({
@@ -104,7 +104,7 @@ describe("WalletConnect", () => {
     const onStatus = vi.fn();
     render(<WalletConnect {...defaultProps} chain="base" onStatus={onStatus} />);
 
-    await user.click(screen.getByText("Connect MetaMask"));
+    await user.click(screen.getByText("Connect Wallet"));
     expect(connectEvm).toHaveBeenCalledWith("base");
     expect(onStatus).toHaveBeenCalledWith("pending", expect.stringContaining("0x1234"));
   });
@@ -117,7 +117,7 @@ describe("WalletConnect", () => {
     const onStatus = vi.fn();
     render(<WalletConnect {...defaultProps} chain="base" onStatus={onStatus} />);
 
-    await user.click(screen.getByText("Connect MetaMask"));
+    await user.click(screen.getByText("Connect Wallet"));
     expect(onStatus).toHaveBeenCalledWith("error", "User rejected");
   });
 
@@ -140,7 +140,7 @@ describe("WalletConnect", () => {
   it("disables connect button when disabled prop is true", () => {
     vi.mocked(isEvmAvailable).mockReturnValue(true);
     render(<WalletConnect {...defaultProps} chain="base" disabled />);
-    expect(screen.getByText("Connect MetaMask")).toBeDisabled();
+    expect(screen.getByText("Connect Wallet")).toBeDisabled();
   });
 
   it("sends EVM payment after connecting", async () => {
@@ -165,7 +165,7 @@ describe("WalletConnect", () => {
     );
 
     // Connect
-    await user.click(screen.getByText("Connect MetaMask"));
+    await user.click(screen.getByText("Connect Wallet"));
 
     // Send
     await user.click(screen.getByText("Pay $10.00 USDC"));
@@ -185,7 +185,7 @@ describe("WalletConnect", () => {
     const onStatus = vi.fn();
     render(<WalletConnect {...defaultProps} chain="base" onStatus={onStatus} />);
 
-    await user.click(screen.getByText("Connect MetaMask"));
+    await user.click(screen.getByText("Connect Wallet"));
     await user.click(screen.getByText("Pay $10.00 USDC"));
     expect(onStatus).toHaveBeenCalledWith("error", "Insufficient balance");
   });

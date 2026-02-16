@@ -1,4 +1,4 @@
-// EVM wallet (MetaMask) integration via ethers.js v6
+// EVM wallet integration via ethers.js v6 (works with any EIP-1193 wallet)
 
 import { BrowserProvider, Contract, parseUnits, type Signer } from "ethers";
 import { ERC20_ABI, EVM_CHAIN_IDS, type ChainId } from "../config";
@@ -17,7 +17,7 @@ export function isEvmAvailable(): boolean {
 }
 
 export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; address: string }> {
-  if (!window.ethereum) throw new Error("MetaMask not detected");
+  if (!window.ethereum) throw new Error("No EVM wallet detected");
 
   const provider = new BrowserProvider(window.ethereum);
   await provider.send("eth_requestAccounts", []);
@@ -30,7 +30,7 @@ export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; ad
     } catch (err: unknown) {
       const switchErr = err as { code?: number };
       if (switchErr.code === 4902) {
-        throw new Error(`Please add ${chainId} network to MetaMask`);
+        throw new Error(`Please add ${chainId} network to your wallet`);
       }
       throw err;
     }

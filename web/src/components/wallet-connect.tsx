@@ -9,7 +9,7 @@ import type { StatusType } from "./status-message";
 import type { Signer } from "ethers";
 
 const INSTALL_URLS: Record<string, { name: string; url: string }> = {
-  evm: { name: "MetaMask", url: "https://metamask.io/download/" },
+  evm: { name: "EVM wallet", url: "https://metamask.io/download/" },
   sol: { name: "Phantom", url: "https://phantom.app/download" },
   ton: { name: "Tonkeeper", url: "https://tonkeeper.com/" },
 };
@@ -110,12 +110,12 @@ export function WalletConnect({
               w-full rounded-lg px-4 py-3 text-sm font-semibold
               transition-all duration-150
               ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
-              ${isEvm ? "bg-[#f6851b] hover:bg-[#e2761b] text-white" : ""}
+              ${isEvm ? "bg-[#3b82f6] hover:bg-[#2563eb] text-white" : ""}
               ${isSol ? "bg-[#ab9ff2] hover:bg-[#9b8fe2] text-black" : ""}
               ${isTon ? "bg-[#0098ea] hover:bg-[#0088d0] text-white" : ""}
             `}
           >
-            {isEvm && "Connect MetaMask"}
+            {isEvm && "Connect Wallet"}
             {isSol && "Connect Phantom"}
             {isTon && "Connect TON Wallet"}
           </button>
