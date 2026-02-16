@@ -2,7 +2,10 @@ import "dotenv/config";
 
 export interface Config {
   port: number;
-  databaseUrl: string;
+  /** Supabase project URL */
+  supabaseUrl: string;
+  /** Supabase service role key (bypasses RLS) */
+  supabaseKey: string;
   wallets: {
     base: string;
     eth: string;
@@ -33,7 +36,8 @@ export interface Config {
 export function loadConfig(): Config {
   return {
     port: Number(process.env.PORT) || 3003,
-    databaseUrl: process.env.DATABASE_URL ?? "./data/payments.db",
+    supabaseUrl: process.env.SUPABASE_URL ?? "",
+    supabaseKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
     wallets: {
       base: process.env.WALLET_BASE ?? "",
       eth: process.env.WALLET_ETH ?? "",

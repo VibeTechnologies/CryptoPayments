@@ -25,10 +25,19 @@ spec:
           env:
             - name: PORT
               value: "3003"
-            - name: DATABASE_URL
-              value: /data/payments.db
             - name: BASE_URL
               value: https://pay.oclawbox.com
+            # Supabase
+            - name: SUPABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: crypto-payments-secret
+                  key: SUPABASE_URL
+            - name: SUPABASE_SERVICE_ROLE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: crypto-payments-secret
+                  key: SUPABASE_SERVICE_ROLE_KEY
             # Receiving wallet addresses
             - name: WALLET_BASE
               valueFrom:
@@ -114,10 +123,4 @@ spec:
             limits:
               memory: "256Mi"
               cpu: "250m"
-          volumeMounts:
-            - name: data
-              mountPath: /data
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: crypto-payments-data
+

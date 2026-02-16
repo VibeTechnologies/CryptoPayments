@@ -321,7 +321,8 @@ describe("verifyTransfer dispatcher", () => {
 function makeConfig(wallets?: Partial<Record<string, string>>) {
   return {
     port: 3003,
-    databaseUrl: ":memory:",
+    supabaseUrl: "https://test.supabase.co",
+    supabaseKey: "test-key",
     wallets: {
       base: wallets?.base ?? "0xTestBaseWallet",
       eth: wallets?.eth ?? "0xTestEthWallet",
