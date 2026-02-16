@@ -8,6 +8,12 @@ import { isSolanaAvailable, connectSolana, sendSolanaTransfer } from "@/lib/wall
 import type { StatusType } from "./status-message";
 import type { Signer } from "ethers";
 
+const INSTALL_URLS: Record<string, { name: string; url: string }> = {
+  evm: { name: "MetaMask", url: "https://metamask.io/download/" },
+  sol: { name: "Phantom", url: "https://phantom.app/download" },
+  ton: { name: "Tonkeeper", url: "https://tonkeeper.com/" },
+};
+
 interface WalletConnectProps {
   chain: ChainId;
   token: TokenId;
@@ -37,20 +43,22 @@ export function WalletConnect({
   const isSol = chain === "sol";
   const isTon = chain === "ton";
 
-  // Determine which wallet button to show
+  // Check extension availability
   const hasEvmWallet = isEvm && isEvmAvailable();
   const hasSolWallet = isSol && isSolanaAvailable();
-  const hasTonWallet = isTon; // TonConnect always available via QR
 
-  if (!hasEvmWallet && !hasSolWallet && !hasTonWallet) {
-    return (
-      <p className="text-sm text-muted">
-        No compatible wallet detected for this network. Use the manual payment option below.
-      </p>
-    );
-  }
+  // Determine wallet type for install prompt
+  const walletType = isEvm ? "evm" : isSol ? "sol" : "ton";
+  const walletInfo = INSTALL_URLS[walletType];
+  const hasExtension = hasEvmWallet || hasSolWallet || isTon;
 
   async function handleConnect() {
+    // If no extension, open install page
+    if (!hasExtension) {
+      window.open(walletInfo.url, "_blank", "noopener,noreferrer");
+      return;
+    }
+
     try {
       if (isEvm) {
         const { signer, address } = await connectEvm(chain);
@@ -92,24 +100,42 @@ export function WalletConnect({
 
   return (
     <div className="space-y-3">
-      {/* Connect button */}
+      {/* Connect button — always shown */}
       {!connectedAddress && (
-        <button
-          onClick={handleConnect}
-          disabled={disabled}
-          className={`
-            w-full rounded-lg px-4 py-3 text-sm font-semibold
-            transition-all duration-150
-            ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
-            ${isEvm ? "bg-[#f6851b] hover:bg-[#e2761b] text-white" : ""}
-            ${isSol ? "bg-[#ab9ff2] hover:bg-[#9b8fe2] text-black" : ""}
-            ${isTon ? "bg-[#0098ea] hover:bg-[#0088d0] text-white" : ""}
-          `}
-        >
-          {isEvm && "Connect MetaMask"}
-          {isSol && "Connect Phantom"}
-          {isTon && "Connect TON Wallet"}
-        </button>
+        <>
+          <button
+            onClick={handleConnect}
+            disabled={disabled}
+            className={`
+              w-full rounded-lg px-4 py-3 text-sm font-semibold
+              transition-all duration-150
+              ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
+              ${isEvm ? "bg-[#f6851b] hover:bg-[#e2761b] text-white" : ""}
+              ${isSol ? "bg-[#ab9ff2] hover:bg-[#9b8fe2] text-black" : ""}
+              ${isTon ? "bg-[#0098ea] hover:bg-[#0088d0] text-white" : ""}
+            `}
+          >
+            {isEvm && "Connect MetaMask"}
+            {isSol && "Connect Phantom"}
+            {isTon && "Connect TON Wallet"}
+          </button>
+
+          {/* Install prompt when extension not detected */}
+          {!hasExtension && (
+            <p className="text-xs text-muted text-center">
+              {walletInfo.name} not detected.{" "}
+              <a
+                href={walletInfo.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-accent underline hover:text-accent-hover"
+              >
+                Install {walletInfo.name}
+              </a>{" "}
+              or use manual payment below.
+            </p>
+          )}
+        </>
       )}
 
       {/* Connected state */}
