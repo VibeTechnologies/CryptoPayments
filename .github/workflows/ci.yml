@@ -27,4 +27,33 @@ jobs:
         name: Type-check
 
       - run: pnpm test
-        name: Run tests
+        name: Run unit tests
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: npx playwright install --with-deps chromium
+        name: Install Playwright browsers
+
+      - run: pnpm test:e2e
+        name: Run E2E wallet tests
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: test-results/
+          retention-days: 7

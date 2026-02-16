@@ -7,3 +7,5 @@ data/
 .secrets/
 supabase/.temp/
 supabase/functions/crypto-payments/src/
+test-results/
+playwright-report/

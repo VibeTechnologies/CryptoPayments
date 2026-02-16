@@ -9,6 +9,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "predeploy:edge": "rm -rf supabase/functions/crypto-payments/src && cp -r src supabase/functions/crypto-payments/src",
     "deploy:edge": "supabase functions deploy crypto-payments --no-verify-jwt"
   },
@@ -25,6 +26,7 @@
     ]
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@solana/web3.js": "^1.98.4",
     "@ton/crypto": "^3.3.0",
     "@ton/ton": "^16.2.2",
