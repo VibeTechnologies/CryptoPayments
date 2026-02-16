@@ -51,7 +51,7 @@ export const TOKENS: { id: TokenId; name: string }[] = [
   { id: "usdt", name: "USDT" },
 ];
 
-// EVM chain IDs for MetaMask
+// EVM chain IDs for wallet_switchEthereumChain
 export const EVM_CHAIN_IDS: Record<string, string> = {
   base: "0x2105",
   eth: "0x1",
