@@ -1,0 +1,14 @@
+# For detailed configuration reference documentation, visit:
+# https://supabase.com/docs/guides/local-development/cli/config
+project_id = "wxxnkncwneyhmudfyayd"
+
+[api]
+enabled = true
+port = 54321
+
+[db]
+port = 54322
+
+[functions.crypto-payments]
+verify_jwt = false
+entrypoint = "./functions/crypto-payments/index.ts"

@@ -1,7 +1,7 @@
 import { createPublicClient, http, parseAbiItem, type Address, formatUnits } from "viem";
 import { base, mainnet } from "viem/chains";
-import type { ChainId, Config } from "./config.js";
-import { TOKEN_ADDRESSES } from "./config.js";
+import type { ChainId, Config } from "./config.ts";
+import { TOKEN_ADDRESSES } from "./config.ts";
 
 /** ERC-20 Transfer event signature */
 const TRANSFER_EVENT = parseAbiItem(

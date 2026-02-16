@@ -1,5 +1,3 @@
-import "dotenv/config";
-
 export interface Config {
   port: number;
   /** Supabase project URL */
@@ -33,32 +31,40 @@ export interface Config {
   baseUrl: string;
 }
 
+/** Read an env var with an optional fallback (Deno + Node compatible). */
+const env = (key: string, fallback = ""): string => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const g = globalThis as any;
+  if (g.Deno?.env?.get) return g.Deno.env.get(key) ?? fallback;
+  return g.process?.env?.[key] ?? fallback;
+};
+
 export function loadConfig(): Config {
   return {
-    port: Number(process.env.PORT) || 3003,
-    supabaseUrl: process.env.SUPABASE_URL ?? "",
-    supabaseKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
+    port: Number(env("PORT")) || 3003,
+    supabaseUrl: env("SUPABASE_URL"),
+    supabaseKey: env("SUPABASE_SERVICE_ROLE_KEY"),
     wallets: {
-      base: process.env.WALLET_BASE ?? "",
-      eth: process.env.WALLET_ETH ?? "",
-      ton: process.env.WALLET_TON ?? "",
-      sol: process.env.WALLET_SOL ?? "",
+      base: env("WALLET_BASE"),
+      eth: env("WALLET_ETH"),
+      ton: env("WALLET_TON"),
+      sol: env("WALLET_SOL"),
     },
     rpc: {
-      base: process.env.RPC_BASE ?? "https://mainnet.base.org",
-      eth: process.env.RPC_ETH ?? "https://cloudflare-eth.com",
-      sol: process.env.RPC_SOL ?? "https://api.mainnet-beta.solana.com",
-      ton: process.env.RPC_TON ?? "https://toncenter.com/api/v3",
+      base: env("RPC_BASE", "https://mainnet.base.org"),
+      eth: env("RPC_ETH", "https://cloudflare-eth.com"),
+      sol: env("RPC_SOL", "https://api.mainnet-beta.solana.com"),
+      ton: env("RPC_TON", "https://toncenter.com/api/v3"),
     },
     prices: {
-      starter: Number(process.env.PRICE_STARTER) || 10,
-      pro: Number(process.env.PRICE_PRO) || 25,
-      max: Number(process.env.PRICE_MAX) || 100,
+      starter: Number(env("PRICE_STARTER")) || 10,
+      pro: Number(env("PRICE_PRO")) || 25,
+      max: Number(env("PRICE_MAX")) || 100,
     },
-    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN ?? "",
-    apiKey: process.env.API_KEY ?? "",
-    callbackSecret: process.env.CALLBACK_SECRET ?? "",
-    baseUrl: process.env.BASE_URL ?? "https://pay.openclaw.ai",
+    telegramBotToken: env("TELEGRAM_BOT_TOKEN"),
+    apiKey: env("API_KEY"),
+    callbackSecret: env("CALLBACK_SECRET"),
+    baseUrl: env("BASE_URL", "https://pay.openclaw.ai"),
   };
 }
 
