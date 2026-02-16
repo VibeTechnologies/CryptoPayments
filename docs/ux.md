@@ -1,26 +1,27 @@
 # Payment UX Flow
 
-Crypto payment page for OpenClaw subscriptions. Standalone Next.js SPA hosted separately from the Supabase Edge Function API.
+Crypto payment page for OpenClaw subscriptions. Standalone Next.js SPA hosted on Azure Static Web Apps at `pay.oclawbox.com`, separate from the Supabase Edge Function API.
 
 ## Architecture
 
 ```
-User (browser)  ──>  Next.js SPA (Vercel/static)  ──>  Edge Function API (Supabase)
-                          │                                      │
-                     wallet SDKs                           on-chain verify
-                   (ethers, phantom,                        + webhook to
-                     tonconnect)                            OpenClawBot
+User (browser)  ──>  Next.js SPA (Azure SWA)  ──>  Edge Function API (Supabase)
+                          │                                    │
+                     wallet SDKs                          on-chain verify
+                   (ethers, phantom,                       + webhook to
+                     tonconnect)                           OpenClawBot
 ```
 
-- **SPA** (`/web`): Next.js app. Handles UI, wallet connection, tx signing.
+- **SPA** (`/web`): Next.js static export app. Handles UI, wallet connection, tx signing.
 - **API** (Supabase Edge Function): `/api/config` for chain/token/wallet data, `POST /api/payment` for tx verification.
 - **No HTML from Edge Functions** — Supabase rewrites `text/html` to `text/plain`.
+- **Hosting**: Azure Static Web Apps, custom domain `pay.oclawbox.com`, TLS via Azure.
 
 ## Entry Points
 
 1. **Telegram Mini App**: Bot sends a web_app button with `?plan=starter&uid=123456`. Telegram WebApp JS provides `initData` for auth.
-2. **Direct link**: `https://<spa-host>/pay?plan=starter&uid=123456&idtype=tg`
-3. **Checkout session**: `https://<spa-host>/checkout/<session_id>` — pre-created via `POST /v1/checkout/sessions`.
+2. **Direct link**: `https://pay.oclawbox.com/pay?plan=starter&uid=123456&idtype=tg`
+3. **Checkout session**: `https://pay.oclawbox.com/checkout/<session_id>` — pre-created via `POST /v1/checkout/sessions`.
 
 ## User Flow
 
@@ -28,13 +29,15 @@ User (browser)  ──>  Next.js SPA (Vercel/static)  ──>  Edge Function API
 
 User picks a blockchain network:
 
-| Network      | Wallet        | Chain ID   |
-|-------------|---------------|------------|
-| Base        | MetaMask      | `0x2105`   |
-| Ethereum    | MetaMask      | `0x1`      |
-| Solana      | Phantom       | —          |
-| TON         | TonConnect    | —          |
-| Base Sepolia| MetaMask      | `0x14a34`  |
+| Network       | Wallet Type     | Chain ID   | Notes          |
+|---------------|-----------------|------------|----------------|
+| Base          | Any EVM wallet  | `0x2105`   | Default        |
+| Ethereum      | Any EVM wallet  | `0x1`      |                |
+| Solana        | Phantom         | —          |                |
+| TON           | TonConnect      | —          |                |
+| Base Sepolia  | Any EVM wallet  | `0x14a34`  | Testnet only   |
+
+**Testnet visibility**: Base Sepolia is hidden by default. Only shown when URL contains `?test=true`. This prevents end users from accidentally selecting a testnet.
 
 ### Step 2 — Choose Token
 
@@ -43,24 +46,28 @@ User picks a blockchain network:
 
 Both are 6 decimals on all chains.
 
-### Step 3 — Connect Wallet
+### Step 3 — Connect Wallet & Pay
 
-SPA detects available wallets and shows the appropriate connect button:
+SPA detects available wallets and shows the appropriate connect button. If no wallet extension is detected, a link to install one is shown below the button.
 
-- **EVM chains** (Base, Ethereum, Base Sepolia): `window.ethereum` -> ethers.js v6 `BrowserProvider`
+- **EVM chains** (Base, Ethereum, Base Sepolia): Detects `window.ethereum` -> ethers.js v6 `BrowserProvider`
+  - Button labeled **"Connect Wallet"** (works with any EVM wallet — MetaMask, Rabby, Coinbase Wallet, etc.)
   - Auto-switches chain via `wallet_switchEthereumChain`
-- **Solana**: `window.phantom.solana` -> `connect()`
-- **TON**: TonConnect UI SDK -> modal
+  - If wallet returns error code `4902` (chain not added), falls back to `wallet_addEthereumChain` with full chain parameters (chainName, rpcUrls, nativeCurrency, blockExplorerUrls)
+  - ethers.js v6 wraps the 4902 error three different ways; all are detected
+- **Solana**: Detects `window.phantom.solana` -> `connect()`. SPL token transfer via `@solana/spl-token`.
+- **TON**: TonConnect UI SDK modal. Jetton transfer via TEP-74 standard (`@ton/core`).
 
-### Step 4 — Review & Pay
+**No raw wallet addresses are shown to users.** The SPA auto-constructs the transaction using wallet addresses from the API config.
+
+### Step 4 — Review & Send
 
 Page shows:
 - Plan name + price (fetched from `/api/config` `.prices`)
-- Receiving wallet address (from `/api/config` `.wallets[chain]`)
-- Token contract address (from `/api/config` `.tokens[chain][token]`)
-- "Send Payment" button
+- Connected wallet address (truncated)
+- "Pay $X.XX USDC/USDT" button
 
-User clicks "Send Payment":
+User clicks "Pay":
 1. SPA constructs ERC-20 `transfer()` (EVM), SPL transfer (Solana), or Jetton transfer (TON)
 2. Wallet popup asks user to sign
 3. SPA captures the tx hash from the wallet response
@@ -77,24 +84,16 @@ SPA sends `POST /api/payment`:
   "idType": "tg",
   "uid": "123456",
   "plan": "starter",
-  "callbackUrl": "https://bot.openclaw.ai/crypto-webhook",
+  "callbackUrl": "https://console.oclawbox.com/crypto/webhook",
   "initData": "<telegram_init_data>"
 }
 ```
 
-API verifies on-chain, returns `{ payment: { status: "verified", ... } }`.
+API verifies on-chain, sends webhook to OpenClawBot, returns `{ payment: { status: "verified", ... } }`.
 
 ### Step 6 — Confirmation
 
 Page shows success state. If opened from Telegram, auto-closes after 3 seconds via `tg.close()`.
-
-## Fallback: Manual TX Hash
-
-If wallet connection fails or user sends from an exchange, they can:
-1. Copy the receiving wallet address
-2. Send the exact amount manually
-3. Paste the tx hash into an input field
-4. Click "Verify Payment"
 
 ## API Endpoints (consumed by SPA)
 
@@ -107,4 +106,4 @@ If wallet connection fails or user sends from an exchange, they can:
 
 ## Design
 
-Stripe-like minimal dark theme. Mobile-first (Telegram Mini App). Steps are collapsible cards.
+Stripe-like minimal dark theme. Mobile-first (Telegram Mini App). Steps shown as collapsible cards with numbered step headers.
