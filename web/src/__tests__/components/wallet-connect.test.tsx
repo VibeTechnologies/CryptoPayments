@@ -35,26 +35,60 @@ describe("WalletConnect", () => {
     vi.clearAllMocks();
   });
 
-  it("shows no-wallet message when no wallet detected for EVM", () => {
+  it("always shows Connect MetaMask button for EVM chains", () => {
     vi.mocked(isEvmAvailable).mockReturnValue(false);
-    render(<WalletConnect {...defaultProps} chain="base" />);
-    expect(screen.getByText(/no compatible wallet detected/i)).toBeInTheDocument();
-  });
-
-  it("shows Connect MetaMask button for EVM when MetaMask is available", () => {
-    vi.mocked(isEvmAvailable).mockReturnValue(true);
     render(<WalletConnect {...defaultProps} chain="base" />);
     expect(screen.getByText("Connect MetaMask")).toBeInTheDocument();
   });
 
-  it("shows Connect Phantom button for Solana when Phantom is available", () => {
+  it("shows install prompt when MetaMask extension is not detected", () => {
+    vi.mocked(isEvmAvailable).mockReturnValue(false);
+    render(<WalletConnect {...defaultProps} chain="base" />);
+    expect(screen.getByText(/MetaMask not detected/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Install MetaMask/i })).toHaveAttribute(
+      "href",
+      "https://metamask.io/download/",
+    );
+  });
+
+  it("opens install page when clicking connect without extension", async () => {
+    const user = userEvent.setup();
+    vi.mocked(isEvmAvailable).mockReturnValue(false);
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+
+    render(<WalletConnect {...defaultProps} chain="base" />);
+    await user.click(screen.getByText("Connect MetaMask"));
+
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://metamask.io/download/",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    openSpy.mockRestore();
+  });
+
+  it("does not show install prompt when MetaMask is available", () => {
+    vi.mocked(isEvmAvailable).mockReturnValue(true);
+    render(<WalletConnect {...defaultProps} chain="base" />);
+    expect(screen.getByText("Connect MetaMask")).toBeInTheDocument();
+    expect(screen.queryByText(/MetaMask not detected/i)).not.toBeInTheDocument();
+  });
+
+  it("always shows Connect Phantom button for Solana", () => {
+    vi.mocked(isSolanaAvailable).mockReturnValue(false);
+    render(<WalletConnect {...defaultProps} chain="sol" />);
+    expect(screen.getByText("Connect Phantom")).toBeInTheDocument();
+    expect(screen.getByText(/Phantom not detected/i)).toBeInTheDocument();
+  });
+
+  it("shows Connect Phantom without install prompt when Phantom is available", () => {
     vi.mocked(isSolanaAvailable).mockReturnValue(true);
     render(<WalletConnect {...defaultProps} chain="sol" />);
     expect(screen.getByText("Connect Phantom")).toBeInTheDocument();
+    expect(screen.queryByText(/Phantom not detected/i)).not.toBeInTheDocument();
   });
 
   it("shows Connect TON Wallet button for TON chain", () => {
-    // TON is always available (hasTonWallet = true)
     render(<WalletConnect {...defaultProps} chain="ton" />);
     expect(screen.getByText("Connect TON Wallet")).toBeInTheDocument();
   });
