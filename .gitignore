@@ -7,3 +7,7 @@ data/
 .secrets/
 supabase/.temp/
 supabase/functions/crypto-payments/src/
+test-results/
+web/out/
+web/.next/
+web/node_modules/

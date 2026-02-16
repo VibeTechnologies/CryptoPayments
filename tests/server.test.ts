@@ -289,76 +289,26 @@ describe("Server API", () => {
     });
   });
 
-  // ── Payment page ──
+  // ── Root route (API info — HTML moved to SPA) ──
 
   describe("GET /", () => {
-    it("returns HTML payment page", async () => {
+    it("returns JSON API info", async () => {
       const res = await app.request("/");
       expect(res.status).toBe(200);
-      const html = await res.text();
-      expect(html).toContain("Pay with Crypto");
-      expect(html).toContain("telegram-web-app.js");
-      expect(html).toContain("OpenClaw");
-    });
-
-    it("returns text/html Content-Type", async () => {
-      const res = await app.request("/");
-      expect(res.headers.get("content-type")).toContain("text/html");
-    });
-
-    it("contains all critical DOM element IDs", async () => {
-      const res = await app.request("/");
-      const html = await res.text();
-      for (const id of [
-        "walletAddress",
-        "txHashInput",
-        "submitBtn",
-        "chainBadges",
-        "amountDisplay",
-        "tokenDisplay",
-        "userInfo",
-        "statusMsg",
-      ]) {
-        expect(html).toContain(`id="${id}"`);
-      }
-    });
-
-    it("contains chain badges for all 5 chains", async () => {
-      const res = await app.request("/");
-      const html = await res.text();
-      for (const chain of ["base", "eth", "sol", "ton", "base_sepolia"]) {
-        expect(html).toContain(`data-chain="${chain}"`);
-      }
-      // Verify human-readable chain names are present
-      for (const name of ["Base", "Ethereum", "Solana", "TON", "Base Sepolia"]) {
-        expect(html).toContain(name);
-      }
-    });
-
-    it("includes Web3 wallet integration scripts and buttons", async () => {
-      const res = await app.request("/");
-      const html = await res.text();
-      // CDN scripts for ethers.js and TonConnect
-      expect(html).toContain("ethers");
-      expect(html).toContain("tonconnect-ui");
-      // Wallet connect buttons
-      expect(html).toContain("evmWalletBtn");
-      expect(html).toContain("solWalletBtn");
-      expect(html).toContain("ton-connect-button");
-      // Wallet send button
-      expect(html).toContain("sendTxBtn");
-      expect(html).toContain("Send Payment via Wallet");
+      expect(res.headers.get("content-type")).toContain("application/json");
+      const body = await res.json();
+      expect(body.service).toBe("OpenClaw Crypto Payments API");
+      expect(body.docs).toBe("/api/config");
     });
   });
 
   describe("GET /pay", () => {
-    it("returns same HTML payment page as /", async () => {
+    it("returns JSON redirect notice", async () => {
       const res = await app.request("/pay?plan=starter&uid=123");
       expect(res.status).toBe(200);
-      const html = await res.text();
-      expect(html).toContain("Pay with Crypto");
-      expect(html).toContain("telegram-web-app.js");
-      expect(html).toContain("OpenClaw");
+      expect(res.headers.get("content-type")).toContain("application/json");
+      const body = await res.json();
+      expect(body.message).toContain("SPA");
     });
   });
 
@@ -871,7 +821,7 @@ describe("Server API", () => {
       expect(text).toContain("already been completed");
     });
 
-    it("returns HTML checkout page for valid open session", async () => {
+    it("returns JSON checkout session data for valid open session", async () => {
       const db = mockDb as any;
       const table = db.from("checkout_sessions");
       await table.insert({
@@ -886,16 +836,12 @@ describe("Server API", () => {
 
       const res = await app.request("/checkout/cs_open_test");
       expect(res.status).toBe(200);
-      const html = await res.text();
-      expect(res.headers.get("content-type")).toContain("text/html");
-      // Verify it contains checkout page elements
-      expect(html).toContain("Checkout");
-      expect(html).toContain("$10.00");
-      expect(html).toContain("Starter");
-      expect(html).toContain("walletAddress");
-      expect(html).toContain("txHashInput");
-      expect(html).toContain("submitBtn");
-      expect(html).toContain("chainBadges");
+      expect(res.headers.get("content-type")).toContain("application/json");
+      const body = await res.json();
+      expect(body.id).toBe("cs_open_test");
+      expect(body.amount).toBe(1000);
+      expect(body.plan_id).toBe("starter");
+      expect(body.status).toBe("open");
     });
   });
 
@@ -1022,89 +968,16 @@ describe("Server API", () => {
   // ═══════════════════════════════════════════════════════════════════════════
 
   describe("E2E: payment link → wallet connect flow", () => {
-    // Simulates what OpenClawBot does: constructs a Mini App URL like
-    // ${cryptoPaymentsUrl}/pay?plan=pro&uid=12345678&callback=https://bot.example.com/webhook
-    // User opens the URL in Telegram → payment page loads with wallet integration
+    // HTML rendering moved to separate SPA. These tests verify the API
+    // endpoints that the SPA consumes.
 
-    it("loads payment page with correct plan/uid from query params", async () => {
+    it("GET /pay returns JSON (HTML moved to SPA)", async () => {
       const url = "/pay?plan=pro&uid=12345678&callback=https%3A%2F%2Fbot.example.com%2Fwebhook";
       const res = await app.request(url);
       expect(res.status).toBe(200);
-      const html = await res.text();
-
-      // Page renders with the correct plan reference in the JS
-      expect(html).toContain("Pay with Crypto");
-      // The JS parses plan from query params: params.get('plan') || 'starter'
-      // The HTML itself doesn't embed the plan server-side (it's parsed client-side)
-      // So we verify the JS code that parses params is present
-      expect(html).toContain("params.get('plan')");
-      expect(html).toContain("params.get('uid')");
-      expect(html).toContain("params.get('callback')");
-    });
-
-    it("payment page has all chain badges including Base Sepolia", async () => {
-      const res = await app.request("/pay?plan=starter&uid=99");
-      const html = await res.text();
-
-      expect(html).toContain("data-chain=\"base\"");
-      expect(html).toContain("data-chain=\"eth\"");
-      expect(html).toContain("data-chain=\"sol\"");
-      expect(html).toContain("data-chain=\"ton\"");
-      expect(html).toContain("data-chain=\"base_sepolia\"");
-    });
-
-    it("payment page includes MetaMask wallet connect for EVM chains", async () => {
-      const res = await app.request("/pay?plan=starter&uid=99");
-      const html = await res.text();
-
-      // ethers.js CDN loaded
-      expect(html).toContain("ethers.umd.min.js");
-      // MetaMask connect button
-      expect(html).toContain("evmWalletBtn");
-      expect(html).toContain("connectEvmWallet");
-      // EVM chain IDs for wallet_switchEthereumChain
-      expect(html).toContain("0x2105"); // Base
-      expect(html).toContain("0x14a34"); // Base Sepolia
-      // ERC-20 transfer ABI
-      expect(html).toContain("function transfer(address to, uint256 amount)");
-    });
-
-    it("payment page includes Phantom wallet connect for Solana", async () => {
-      const res = await app.request("/pay?plan=starter&uid=99");
-      const html = await res.text();
-
-      expect(html).toContain("solWalletBtn");
-      expect(html).toContain("connectSolWallet");
-      expect(html).toContain("phantom");
-    });
-
-    it("payment page includes TonConnect UI for TON", async () => {
-      const res = await app.request("/pay?plan=starter&uid=99");
-      const html = await res.text();
-
-      // TonConnect CDN
-      expect(html).toContain("tonconnect-ui");
-      // TonConnect button container
-      expect(html).toContain("ton-connect-button");
-      expect(html).toContain("tonWalletBtnContainer");
-      // TonConnect manifest URL
-      expect(html).toContain("tonconnect-manifest.json");
-    });
-
-    it("payment page has wallet send button and or-divider for manual fallback", async () => {
-      const res = await app.request("/pay?plan=starter&uid=99");
-      const html = await res.text();
-
-      // "Send Payment via Wallet" button
-      expect(html).toContain("sendTxBtn");
-      expect(html).toContain("sendWalletTx");
-      expect(html).toContain("Send Payment via Wallet");
-      // "or" divider between wallet and manual flow
-      expect(html).toContain("orDivider");
-      // Manual fallback still present
-      expect(html).toContain("walletAddress");
-      expect(html).toContain("txHashInput");
-      expect(html).toContain("Paste your transaction hash");
+      expect(res.headers.get("content-type")).toContain("application/json");
+      const body = await res.json();
+      expect(body.message).toContain("SPA");
     });
 
     it("config endpoint returns token addresses used by wallet connect", async () => {
@@ -1132,7 +1005,7 @@ describe("Server API", () => {
       expect(body.prices.max).toBe(100);
     });
 
-    it("checkout page also has wallet connect UI when session is open", async () => {
+    it("checkout endpoint returns JSON session data when session is open", async () => {
       // Create a checkout session first (amount in cents)
       const createRes = await app.request("/v1/checkout/sessions", {
         method: "POST",
@@ -1147,19 +1020,18 @@ describe("Server API", () => {
       });
       expect(createRes.status).toBe(200);
       const session = await createRes.json();
+      // The session object has stripe_id (cs_...) which is the public-facing ID
+      expect(session.stripe_id).toMatch(/^cs_/);
 
-      // Load the checkout page
-      const checkoutRes = await app.request(`/checkout/${session.id}`);
+      // Load the checkout endpoint using the stripe_id (public URL format)
+      const checkoutRes = await app.request(`/checkout/${session.stripe_id}`);
       expect(checkoutRes.status).toBe(200);
-      const html = await checkoutRes.text();
-
-      // Checkout page should also have wallet integration
-      expect(html).toContain("ethers.umd.min.js");
-      expect(html).toContain("tonconnect-ui");
-      expect(html).toContain("evmWalletBtn");
-      expect(html).toContain("solWalletBtn");
-      expect(html).toContain("ton-connect-button");
-      expect(html).toContain("sendTxBtn");
+      expect(checkoutRes.headers.get("content-type")).toContain("application/json");
+      const body = await checkoutRes.json();
+      expect(body.id).toBe(session.stripe_id);
+      expect(body.amount).toBe(1000);
+      expect(body.plan_id).toBe("starter");
+      expect(body.status).toBe("open");
     });
   });
 });
