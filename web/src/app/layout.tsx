@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { Providers } from "./providers";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -24,7 +25,7 @@ export default function RootLayout({
         <script src="https://telegram.org/js/telegram-web-app.js" />
       </head>
       <body className="min-h-screen bg-background text-foreground antialiased">
-        {children}
+        <Providers>{children}</Providers>
       </body>
     </html>
   );
