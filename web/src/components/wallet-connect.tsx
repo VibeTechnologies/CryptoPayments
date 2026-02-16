@@ -24,9 +24,12 @@ function friendlyError(err: unknown): string {
   if (msg.includes("ACTION_REJECTED") || msg.includes("User rejected") || msg.includes("user rejected")) {
     return "Transaction cancelled";
   }
-  // ethers INSUFFICIENT_FUNDS
+  // ethers INSUFFICIENT_FUNDS or ERC20 balance check failure (CALL_EXCEPTION during estimateGas)
   if (msg.includes("INSUFFICIENT_FUNDS") || msg.includes("insufficient funds")) {
-    return "Insufficient funds for this transaction";
+    return "Insufficient funds for gas fees";
+  }
+  if (msg.includes("transfer amount exceeds balance") || msg.includes("exceeds balance")) {
+    return "Insufficient token balance. Please fund your wallet and try again.";
   }
   // Network / RPC errors
   if (msg.includes("NETWORK_ERROR") || msg.includes("network changed")) {
