@@ -51,6 +51,9 @@ export default function PayPage() {
   const [selectedChain, setSelectedChain] = useState<ChainId>("base");
   const [selectedToken, setSelectedToken] = useState<TokenId>("usdc");
 
+  // Testnet visibility (show only when ?test=true)
+  const [showTestnets, setShowTestnets] = useState(false);
+
   // Payment state
   const [status, setStatus] = useState<{ type: StatusType; message: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -60,6 +63,9 @@ export default function PayPage() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const tg = window.Telegram?.WebApp;
+
+    // Enable testnets if ?test=true
+    setShowTestnets(params.get("test") === "true");
 
     let pUid = params.get("uid") || "";
     let pPlan = params.get("plan") || "starter";
@@ -103,6 +109,9 @@ export default function PayPage() {
 
   // Get price for current plan
   const price = config?.prices[plan] ?? config?.prices.starter ?? 10;
+
+  // Filter chains — hide testnets unless ?test=true
+  const visibleChains = showTestnets ? CHAINS : CHAINS.filter((c) => !c.testnet);
 
   // Get wallet address for current chain
   const walletAddress = config?.wallets[selectedChain] ?? "";
@@ -215,7 +224,7 @@ export default function PayPage() {
         <section className="mt-6">
           <StepHeader step={1} title="Select network" />
           <ChainSelector
-            chains={CHAINS}
+            chains={visibleChains}
             selected={selectedChain}
             onSelect={setSelectedChain}
             disabled={verified}

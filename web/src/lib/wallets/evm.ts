@@ -1,7 +1,7 @@
 // EVM wallet integration via ethers.js v6 (works with any EIP-1193 wallet)
 
 import { BrowserProvider, Contract, parseUnits, type Signer } from "ethers";
-import { ERC20_ABI, EVM_CHAIN_IDS, type ChainId } from "../config";
+import { ERC20_ABI, EVM_CHAIN_IDS, EVM_CHAIN_PARAMS, type ChainId } from "../config";
 
 declare global {
   interface Window {
@@ -16,6 +16,18 @@ export function isEvmAvailable(): boolean {
   return typeof window !== "undefined" && !!window.ethereum;
 }
 
+/** Check if a wallet error is "chain not recognized" (code 4902).
+ *  ethers.js v6 wraps the raw provider error in UNKNOWN_ERROR,
+ *  so we also check data.originalError.code. */
+function isChainNotAddedError(err: unknown): boolean {
+  const e = err as { code?: number; data?: { originalError?: { code?: number } } };
+  if (e.code === 4902) return true;
+  if (e.data?.originalError?.code === 4902) return true;
+  // Also match the error message as a last resort
+  if (err instanceof Error && err.message.includes("Unrecognized chain ID")) return true;
+  return false;
+}
+
 export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; address: string }> {
   if (!window.ethereum) throw new Error("No EVM wallet detected");
 
@@ -28,11 +40,17 @@ export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; ad
     try {
       await provider.send("wallet_switchEthereumChain", [{ chainId: targetChainId }]);
     } catch (err: unknown) {
-      const switchErr = err as { code?: number };
-      if (switchErr.code === 4902) {
-        throw new Error(`Please add ${chainId} network to your wallet`);
+      if (isChainNotAddedError(err)) {
+        // Try to add the chain if we have params for it
+        const chainParams = EVM_CHAIN_PARAMS[chainId];
+        if (chainParams) {
+          await provider.send("wallet_addEthereumChain", [chainParams]);
+        } else {
+          throw new Error(`Please add ${chainId} network to your wallet`);
+        }
+      } else {
+        throw err;
       }
-      throw err;
     }
   }
 

@@ -126,7 +126,7 @@ describe("PayPage", () => {
     expect(screen.getByText("Send payment")).toBeInTheDocument();
   });
 
-  it("renders chain selector with all chains", async () => {
+  it("renders chain selector with mainnet chains (hides testnet by default)", async () => {
     render(<PayPage />);
     await waitFor(() => {
       expect(screen.getByText("Base")).toBeInTheDocument();
@@ -134,6 +134,17 @@ describe("PayPage", () => {
     expect(screen.getByText("Ethereum")).toBeInTheDocument();
     expect(screen.getByText("Solana")).toBeInTheDocument();
     expect(screen.getByText("TON")).toBeInTheDocument();
+    // Base Sepolia should be hidden by default
+    expect(screen.queryByText("Base Sepolia")).not.toBeInTheDocument();
+  });
+
+  it("shows testnet chains when ?test=true is set", async () => {
+    setUrlParams({ uid: "12345", plan: "starter", idtype: "tg", test: "true" });
+    render(<PayPage />);
+    await waitFor(() => {
+      expect(screen.getByText("Base")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Base Sepolia")).toBeInTheDocument();
   });
 
   it("renders token selector with USDC and USDT", async () => {

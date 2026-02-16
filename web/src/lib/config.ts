@@ -58,6 +58,26 @@ export const EVM_CHAIN_IDS: Record<string, string> = {
   base_sepolia: "0x14a34",
 };
 
+// Full chain params for wallet_addEthereumChain (testnets / non-default chains)
+export const EVM_CHAIN_PARAMS: Record<
+  string,
+  {
+    chainId: string;
+    chainName: string;
+    rpcUrls: string[];
+    nativeCurrency: { name: string; symbol: string; decimals: number };
+    blockExplorerUrls: string[];
+  }
+> = {
+  base_sepolia: {
+    chainId: "0x14a34",
+    chainName: "Base Sepolia",
+    rpcUrls: ["https://sepolia.base.org"],
+    nativeCurrency: { name: "Sepolia Ether", symbol: "ETH", decimals: 18 },
+    blockExplorerUrls: ["https://sepolia.basescan.org"],
+  },
+};
+
 export const EVM_CHAINS: ChainId[] = ["base", "eth", "base_sepolia"];
 
 // ERC-20 transfer ABI
