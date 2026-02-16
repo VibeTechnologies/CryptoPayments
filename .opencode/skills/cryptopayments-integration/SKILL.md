@@ -1,11 +1,11 @@
 ---
 name: cryptopayments-integration
-description: Deploy CryptoPayments service and integrate it with OpenClawBot. Covers Docker build, K8s deployment on AKS, environment configuration, webhook contract, security, and operational diagnostics.
+description: Deploy CryptoPayments on Supabase Edge Functions and integrate with OpenClawBot. Covers Supabase setup, Edge Function deployment, Stripe-like API, webhook contract, and operational diagnostics.
 ---
 
 # CryptoPayments Integration
 
-Deploy and integrate the CryptoPayments service — a Telegram Mini App for accepting USDT/USDC payments on Base, Ethereum, TON, and Solana. Integrates with OpenClawBot via HMAC-signed webhook callbacks.
+Deploy and integrate CryptoPayments — a Telegram Mini App for accepting USDT/USDC payments on Base, Ethereum, TON, and Solana. Runs entirely on **Supabase** (Edge Functions + Postgres). Integrates with OpenClawBot via HMAC-signed webhook callbacks.
 
 ## Architecture Overview
 
@@ -15,44 +15,50 @@ Telegram User
   ├── /plans → OpenClawBot
   │     └── "Pay with Crypto" button → opens Mini App
   │
-  ├── Mini App (pay.oclawbox.com)
-  │     ├── GET /                → Payment page HTML
-  │     ├── GET /api/config      → Wallet addresses, prices, token addresses
-  │     └── POST /api/payment    → Submit tx hash for verification
-  │           ├── On-chain verify (viem/TonCenter/Solana RPC)
-  │           ├── Record in SQLite
+  ├── Mini App (Supabase Edge Function)
+  │     ├── GET /                      → Payment page HTML
+  │     ├── GET /checkout/:id          → Checkout session page
+  │     ├── GET /api/config            → Wallet addresses, prices, token addresses
+  │     ├── POST /api/payment          → Legacy: submit tx hash for verification
+  │     ├── POST /v1/checkout/sessions → Stripe-like: create checkout session
+  │     │
+  │     └── On payment verification:
+  │           ├── On-chain verify (viem / TonCenter / Solana RPC)
+  │           ├── Record in Supabase Postgres
   │           └── POST callback → OpenClawBot /crypto/webhook
   │
-  └── OpenClawBot (webhook receiver)
+  └── OpenClawBot (webhook receiver, port 3003)
         ├── Verify HMAC-SHA256 signature
         ├── Idempotency check (crypto_tx_hash UNIQUE)
         ├── activateSubscription() + provisionAndNotify()
         └── User gets subscription + tenant provisioned
 ```
 
-**Key principle**: CryptoPayments verifies on-chain transactions. OpenClawBot trusts the webhook callback (after HMAC verification) and activates subscriptions.
+**Key principles:**
+- **Fully backendless** — No Docker, no K8s deployment for CryptoPayments. Supabase Edge Functions for compute, Supabase Postgres for storage.
+- **Stripe-like API** — Customers, invoices, line items, payment intents, checkout sessions, webhook events. Stripe-style prefixed IDs (`cus_`, `inv_`, `il_`, `pi_`, `cs_`, `evt_`).
+- CryptoPayments verifies on-chain transactions. OpenClawBot trusts the webhook callback (after HMAC verification) and activates subscriptions.
 
 ## Prerequisites
 
-- AKS cluster running (`openclaw-aks`) with Traefik ingress and wildcard TLS
-- `kubectl` configured: `export KUBECONFIG=./infra/terraform/kubeconfig`
-- `ghcr-pull` image pull secret in `default` namespace
-- `openclaw-bot-secret` with `TELEGRAM_BOT_TOKEN` (shared by CryptoPayments)
-- Docker + pnpm for local development
+- Supabase CLI installed (`brew install supabase/tap/supabase`)
+- Supabase project linked (`supabase link --project-ref <project-ref>`)
+- `pnpm` for local development
+- Node.js 22+ (for local dev/testing via `tsx`)
 
 ## Service Details
 
 | Property | Value |
 |----------|-------|
 | **Repo** | `VibeTechnologies/CryptoPayments` |
-| **Runtime** | Node.js 22, TypeScript (ESM) |
-| **Framework** | Hono + `@hono/node-server` |
-| **Database** | SQLite via `better-sqlite3` |
-| **Image** | `ghcr.io/vibetechnologies/crypto-payments:latest` |
-| **Port** | 3003 |
-| **External URL** | `https://pay.oclawbox.com` |
-| **In-cluster URL** | `http://crypto-payments.default.svc.cluster.local:3003` |
-| **Namespace** | `default` |
+| **Runtime** | Deno (Supabase Edge Functions) / Node.js 22 (local dev) |
+| **Framework** | Hono (runtime-agnostic) |
+| **Database** | Supabase Postgres via `@supabase/supabase-js` |
+| **Supabase Project** | `wxxnkncwneyhmudfyayd` |
+| **API URL** | `https://wxxnkncwneyhmudfyayd.supabase.co` |
+| **Edge Function URL** | `https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments/` |
+| **Dashboard** | https://supabase.com/dashboard/project/wxxnkncwneyhmudfyayd |
+| **Region** | East US (North Virginia) |
 
 ### Chains & Tokens
 
@@ -67,19 +73,32 @@ Telegram User
 
 | Plan | Price USD | Tolerance |
 |------|-----------|-----------|
-| starter | $10 | 1% ($9.90-$10.10) |
-| pro | $25 | 1% ($24.75-$25.25) |
-| max | $100 | 1% ($99.00-$101.00) |
+| starter | $10 | 1% ($9.90–$10.10) |
+| pro | $25 | 1% ($24.75–$25.25) |
+| max | $100 | 1% ($99.00–$101.00) |
+
+**Amounts stored in cents** (integer) in the Stripe-like schema, converted to dollars for the legacy compatibility layer.
+
+### Generated Wallet Addresses
+
+| Chain | Address |
+|-------|---------|
+| EVM (Base/ETH) | `0x22Cdc7925ffAb409EbCA5ab8c912Fcd8E2644acD` |
+| TON | `UQDQx44DMgyzrR0XFgdX6XWFeAiVKiCZzLd4-pBeotG4xeE7` |
+| Solana | `3z6XF6mRAoT59mgLFwQTUmWdjeC6r5ttJr3AYv7Mootc` |
 
 ## Environment Configuration
 
-### CryptoPayments Service (`.env`)
+### CryptoPayments Service (`.env` for local dev)
 
 ```bash
-# Server
+# Supabase (auto-injected in Edge Functions — only needed locally)
+SUPABASE_URL=https://wxxnkncwneyhmudfyayd.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=...
+
+# Server (local dev only)
 PORT=3003
-BASE_URL=https://pay.oclawbox.com     # IMPORTANT: match K8s ingress host
-DATABASE_URL=./data/payments.db
+BASE_URL=https://pay.openclaw.ai
 
 # Receiving wallet addresses (one per chain)
 WALLET_BASE=0x...
@@ -87,13 +106,13 @@ WALLET_ETH=0x...
 WALLET_TON=UQ...
 WALLET_SOL=...
 
-# RPC endpoints (defaults to public endpoints — use paid RPCs in production)
+# RPC endpoints (defaults to public endpoints)
 RPC_BASE=https://mainnet.base.org
 RPC_ETH=https://cloudflare-eth.com
 RPC_SOL=https://api.mainnet-beta.solana.com
 RPC_TON=https://toncenter.com/api/v3
 
-# Plan prices (matched against on-chain stablecoin amount)
+# Plan prices
 PRICE_STARTER=10
 PRICE_PRO=25
 PRICE_MAX=100
@@ -102,109 +121,170 @@ PRICE_MAX=100
 TELEGRAM_BOT_TOKEN=
 
 # Auth
-API_KEY=                # Shared secret for bot → payment service API calls
-CALLBACK_SECRET=        # HMAC-SHA256 key for webhook callbacks to OpenClawBot
+API_KEY=cpk_...        # API key for bot → payment service calls
+CALLBACK_SECRET=       # HMAC-SHA256 key for webhook callbacks
+```
+
+**Note:** `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are auto-injected in Edge Functions. You cannot manually set them via `supabase secrets set`.
+
+### Supabase Edge Function Secrets
+
+Set via `supabase secrets set`:
+
+```bash
+supabase secrets set \
+  WALLET_BASE=0x... \
+  WALLET_ETH=0x... \
+  WALLET_TON=UQ... \
+  WALLET_SOL=... \
+  API_KEY=cpk_... \
+  CALLBACK_SECRET=... \
+  TELEGRAM_BOT_TOKEN=...
 ```
 
 ### OpenClawBot (`.env` additions)
 
 ```bash
 CRYPTO_PAYMENTS_ENABLED=true
-CRYPTO_PAYMENTS_URL=https://pay.oclawbox.com     # CryptoPayments external URL
-CRYPTO_PAYMENTS_API_KEY=                           # Same as CryptoPayments API_KEY
-CRYPTO_CALLBACK_SECRET=                            # Same as CryptoPayments CALLBACK_SECRET
-CRYPTO_WEBHOOK_PORT=3003                           # HTTP server port for webhook receiver
+CRYPTO_PAYMENTS_URL=https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments
+CRYPTO_PAYMENTS_API_KEY=cpk_...         # Same as CryptoPayments API_KEY
+CRYPTO_CALLBACK_SECRET=                  # Same as CryptoPayments CALLBACK_SECRET
+CRYPTO_WEBHOOK_PORT=3003                 # HTTP server port for webhook receiver
 ```
 
 **Critical**: `CRYPTO_CALLBACK_SECRET` in OpenClawBot must match `CALLBACK_SECRET` in CryptoPayments. Generate with: `openssl rand -hex 32`
 
-### BASE_URL Mismatch Warning
+## Deployment (Supabase Edge Function)
 
-The CryptoPayments config defaults to `https://pay.openclaw.ai` but the K8s ingress is configured for `pay.oclawbox.com`. Always set `BASE_URL=https://pay.oclawbox.com` explicitly in both the env and K8s deployment to avoid incorrect Mini App URLs.
+### How It Works
 
-## Deployment (Kubernetes)
+The Hono app in `src/server.ts` exports a `createApp()` factory that returns a runtime-agnostic Hono `app`. The Edge Function entry point at `supabase/functions/crypto-payments/index.ts` imports this app, strips the `/crypto-payments` path prefix (added by Supabase routing), and calls `Deno.serve()`.
 
-### K8s Resources
+Because Supabase can only deploy files within `supabase/`, the `predeploy:edge` script copies `src/` into `supabase/functions/crypto-payments/src/` before deployment. This copied directory is gitignored.
 
-| Resource | File | Description |
-|----------|------|-------------|
-| Deployment | `k8s/deployment.yaml` | 1 replica, RollingUpdate, `ghcr.io/vibetechnologies/crypto-payments:latest` |
-| Service | `k8s/service.yaml` | ClusterIP on port 3003 |
-| IngressRoute | `k8s/ingress.yaml` | Traefik: `pay.oclawbox.com` → port 3003 |
-| PVC | `k8s/pvc.yaml` | `crypto-payments-data` 1Gi RWO (SQLite) |
-| Kustomization | `k8s/kustomization.yaml` | Namespace: `default` |
+### Import Resolution
 
-### Secrets Required
+Bare specifiers (`hono`, `viem`, `@supabase/supabase-js`) are mapped via `supabase/functions/crypto-payments/deno.json`:
 
-Two K8s secrets are referenced:
-
-**`crypto-payments-secret`** (must create manually):
-```bash
-kubectl create secret generic crypto-payments-secret \
-  --from-literal=WALLET_BASE=0x... \
-  --from-literal=WALLET_ETH=0x... \
-  --from-literal=WALLET_TON=UQ... \
-  --from-literal=WALLET_SOL=... \
-  --from-literal=API_KEY=$(openssl rand -hex 32) \
-  --from-literal=CALLBACK_SECRET=$(openssl rand -hex 32) \
-  --from-literal=RPC_BASE=https://mainnet.base.org \
-  --from-literal=RPC_ETH=https://cloudflare-eth.com \
-  --from-literal=RPC_SOL=https://api.mainnet-beta.solana.com \
-  --from-literal=RPC_TON=https://toncenter.com/api/v3
+```json
+{
+  "imports": {
+    "hono": "npm:hono@4",
+    "hono/": "npm:hono@4/",
+    "viem": "npm:viem@2",
+    "viem/": "npm:viem@2/",
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2"
+  }
+}
 ```
-
-**`openclaw-bot-secret`** (already exists — shared for `TELEGRAM_BOT_TOKEN`)
 
 ### Deploy Steps
 
 ```bash
-export KUBECONFIG=./infra/terraform/kubeconfig
+# 1. Deploy Edge Function (copies src/ and deploys)
+pnpm deploy:edge
 
-# 1. Create secret (if not exists)
-kubectl create secret generic crypto-payments-secret \
-  --from-literal=WALLET_BASE=0x... \
-  --from-literal=WALLET_ETH=0x... \
-  --from-literal=WALLET_TON=UQ... \
-  --from-literal=WALLET_SOL=... \
-  --from-literal=API_KEY=<shared-api-key> \
-  --from-literal=CALLBACK_SECRET=<shared-callback-secret>
+# This runs:
+#   pnpm predeploy:edge  →  cp -r src/ supabase/functions/crypto-payments/src/
+#   supabase functions deploy crypto-payments --no-verify-jwt
 
-# 2. Apply all K8s resources
-kubectl apply -k k8s/
-
-# 3. Wait for rollout
-kubectl rollout status deployment/crypto-payments --timeout=120s
-
-# 4. Verify
-curl -s https://pay.oclawbox.com/api/health | python3 -m json.tool
+# 2. Verify
+curl -s https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments/api/health
 # Expected: {"ok":true,"chains":["base","eth","ton","sol"],"tokens":["usdt","usdc"]}
-```
 
-### Docker Build (Local / CI)
-
-```bash
-# Build
-docker build -t ghcr.io/vibetechnologies/crypto-payments:latest .
-
-# Run locally
-docker run -p 3003:3003 \
-  -v $(pwd)/data:/app/data \
-  --env-file .env \
-  ghcr.io/vibetechnologies/crypto-payments:latest
-
-# Push to GHCR
-docker push ghcr.io/vibetechnologies/crypto-payments:latest
+# 3. Set secrets (if not already done)
+supabase secrets set WALLET_BASE=0x... API_KEY=cpk_... CALLBACK_SECRET=...
 ```
 
 ### Local Development
 
 ```bash
 pnpm install
-pnpm dev        # Watch mode (tsx)
-pnpm build      # TypeScript → dist/
-pnpm test       # 48 tests via vitest
-pnpm start      # Production: node dist/server.js
+pnpm dev        # Watch mode via tsx (Node.js runtime)
+pnpm build      # TypeScript type-check only (no JS emit)
+pnpm test       # 45 tests via vitest
 ```
+
+**Note:** `pnpm build` only type-checks (`noEmit: true` in tsconfig). The codebase uses `.ts` extension imports with `allowImportingTsExtensions: true`. Locally it runs via `tsx`, in production via Deno.
+
+### Dual-Runtime Compatibility
+
+The `config.ts` env helper supports both Deno and Node.js:
+
+```typescript
+const g = globalThis as any;
+if (g.Deno?.env?.get) return g.Deno.env.get(key);
+else return g.process?.env?.[key];
+```
+
+## API Endpoints (24 total)
+
+### Public (No Auth)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Payment page HTML (Telegram Mini App) |
+| GET | `/checkout/:id` | Checkout session page HTML |
+| GET | `/api/health` | Health check |
+| GET | `/api/config` | Wallet addresses, prices, token addresses |
+
+### Legacy API (API key or initData)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/payment` | initData or API key | Submit tx hash for verification |
+| GET | `/api/payment/:id` | API key | Get payment by ID |
+| GET | `/api/payments` | API key | List payments for a user |
+
+### Stripe-like API (`/v1/*`, API key via `x-api-key` header)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/customers` | Create customer |
+| GET | `/v1/customers/:id` | Retrieve customer |
+| GET | `/v1/customers` | List customers |
+| POST | `/v1/invoices` | Create invoice |
+| GET | `/v1/invoices/:id` | Retrieve invoice |
+| GET | `/v1/invoices` | List invoices |
+| POST | `/v1/invoices/:id/line_items` | Add line item to invoice |
+| POST | `/v1/payment_intents` | Create payment intent |
+| GET | `/v1/payment_intents/:id` | Retrieve payment intent |
+| POST | `/v1/payment_intents/:id/verify` | Verify payment on-chain |
+| POST | `/v1/checkout/sessions` | Create checkout session |
+| GET | `/v1/checkout/sessions/:id` | Retrieve checkout session |
+| GET | `/v1/events` | List webhook events |
+| GET | `/v1/events/:id` | Retrieve event |
+
+### Authentication
+
+- **API routes**: `x-api-key` header or `api_key` query parameter
+- **Legacy POST /api/payment**: Either Telegram `initData` (Mini App HMAC) or API key
+- **Public HTML/health/config**: No auth required
+
+### Stripe-like Object IDs
+
+| Prefix | Object |
+|--------|--------|
+| `cus_` | Customer |
+| `inv_` | Invoice |
+| `il_` | Line Item |
+| `pi_` | Payment Intent |
+| `cs_` | Checkout Session |
+| `evt_` | Event |
+
+## Database Schema (Supabase Postgres)
+
+Six Stripe-like tables plus one legacy table. Schema in `supabase/schema.sql` (190 lines).
+
+| Table | Primary Key | Description |
+|-------|-------------|-------------|
+| `customers` | `id` (cus_...) | Customer records |
+| `invoices` | `id` (inv_...) | Invoice records with status tracking |
+| `line_items` | `id` (il_...) | Invoice line items (amount in cents) |
+| `payment_intents` | `id` (pi_...) | Payment intents with chain/token/tx info |
+| `checkout_sessions` | `id` (cs_...) | Checkout session state |
+| `events` | `id` (evt_...) | Webhook event log |
+| `payments` | `id` (uuid) | Legacy payments table |
 
 ## Webhook Contract
 
@@ -212,12 +292,7 @@ CryptoPayments sends a POST webhook to OpenClawBot when a payment is verified on
 
 ### Callback URL
 
-Constructed by the caller when submitting `POST /api/payment`. OpenClawBot constructs:
-```
-{botBaseUrl}/crypto/webhook
-```
-
-The CryptoPayments service calls `sendCallback(callbackUrl, payment)` after successful on-chain verification.
+Caller-supplied — OpenClawBot passes `callbackUrl` in the payment request body. CryptoPayments calls `sendCallback(callbackUrl, payment)` (in `server.ts:557`) after successful on-chain verification.
 
 ### Request Format
 
@@ -252,7 +327,7 @@ X-Timestamp: <Unix seconds string>
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 const expectedSig = createHmac("sha256", CALLBACK_SECRET)
-  .update(rawBody)      // raw JSON string, not parsed
+  .update(rawBody)
   .digest("hex");
 
 const valid = timingSafeEqual(
@@ -264,7 +339,7 @@ const valid = timingSafeEqual(
 ### Security Measures (OpenClawBot webhook handler)
 
 1. **HMAC-SHA256** — constant-time comparison of `X-Signature` header
-2. **Timestamp validation** — rejects requests with `X-Timestamp` older than 5 minutes
+2. **Timestamp validation** — rejects requests older than 5 minutes
 3. **Rate limiting** — per-IP sliding window
 4. **Body size limit** — rejects payloads > 10KB
 5. **POST-only** — rejects all other HTTP methods
@@ -275,39 +350,8 @@ const valid = timingSafeEqual(
 
 - `200` — Webhook received (processing is async)
 - `401` — Invalid signature
-- `405` — Method not allowed (non-POST)
+- `405` — Method not allowed
 - `429` — Rate limited
-
-## API Endpoints (CryptoPayments Service)
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/` | None | Payment page (Telegram Mini App HTML) |
-| GET | `/api/health` | None | Health check |
-| GET | `/api/config` | None | Wallet addresses, prices, token addresses |
-| POST | `/api/payment` | initData or API key | Submit tx hash for verification |
-| GET | `/api/payments` | API key | List payments for a user |
-
-### POST /api/payment
-
-**Body:**
-```json
-{
-  "txHash": "0xabc...",
-  "chainId": "base",
-  "token": "usdc",
-  "idType": "telegram",
-  "uid": "123456789",
-  "plan": "pro",
-  "callbackUrl": "https://bot-internal-url/crypto/webhook",
-  "initData": "...",
-  "apiKey": "..."
-}
-```
-
-Auth: Either `initData` (Telegram Mini App HMAC) or `apiKey` (server-to-server). At least one required.
-
-**Flow:** Insert pending payment → verify on-chain → mark verified → send webhook callback → return result.
 
 ## Integration Points with OpenClawBot
 
@@ -315,14 +359,14 @@ Auth: Either `initData` (Telegram Mini App HMAC) or `apiKey` (server-to-server).
 
 | File | Changes |
 |------|---------|
-| `src/config.ts` | 5 new config fields (cryptoPaymentsEnabled, URL, API key, callback secret, webhook port) |
+| `src/config.ts` | 5 crypto config fields (enabled, URL, API key, callback secret, webhook port) |
 | `src/db/schema.ts` | `cryptoTxHash` column in payments table |
 | `src/db/client.ts` | CREATE TABLE, ALTER TABLE migration, unique index for `crypto_tx_hash` |
 | `src/db/payments.ts` | `getPaymentByCryptoTxHash()`, extended `RecordPaymentInput` |
 | `src/payments/success.ts` | `"crypto"` in paymentMethod union, `cryptoTxHash` routing |
 | `src/payments/wallet-pay-flow.ts` | "Pay with Crypto" button in `buildPaymentMethodKeyboard()` |
 | `src/commands/plans.ts` | `pay_crypto:` callback handler, Mini App `webApp` button |
-| `src/index.ts` | Crypto webhook HTTP server wiring + graceful shutdown |
+| `src/index.ts` | Crypto webhook HTTP server on port 3003 + graceful shutdown |
 | `.env.example` | 5 new env vars |
 | `docs/payments.md` | CryptoPayments documentation section |
 
@@ -343,111 +387,198 @@ Auth: Either `initData` (Telegram Mini App HMAC) or `apiKey` (server-to-server).
 
 All three converge at `activateSubscription()` + `provisionAndNotify()`.
 
+### Mini App URL Construction
+
+OpenClawBot builds the Mini App URL in `src/commands/plans.ts:217`:
+
+```typescript
+`${cryptoPaymentsUrl}/pay?plan=${planId}&uid=${ctx.from.id}`
+```
+
+Where `cryptoPaymentsUrl` defaults to the Edge Function URL.
+
+## OpenClawBot K8s Configuration
+
+The OpenClawBot deployment needs these additions to support the crypto webhook receiver:
+
+### Required K8s Secret Keys
+
+Add to `openclaw-bot-secret`:
+
+| Key | Description |
+|-----|-------------|
+| `CRYPTO_CALLBACK_SECRET` | HMAC-SHA256 shared secret (same as CryptoPayments CALLBACK_SECRET) |
+| `CRYPTO_PAYMENTS_API_KEY` | API key for bot → CryptoPayments calls |
+
+### Required Deployment Env Vars
+
+```yaml
+- name: CRYPTO_PAYMENTS_ENABLED
+  value: "true"
+- name: CRYPTO_PAYMENTS_URL
+  value: "https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments"
+- name: CRYPTO_PAYMENTS_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: openclaw-bot-secret
+      key: CRYPTO_PAYMENTS_API_KEY
+- name: CRYPTO_CALLBACK_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: openclaw-bot-secret
+      key: CRYPTO_CALLBACK_SECRET
+- name: CRYPTO_WEBHOOK_PORT
+  value: "3003"
+```
+
+### Required Service/Ingress
+
+- Service: expose port 3003 (targetPort 3003) named `crypto-webhook`
+- Deployment: add `containerPort: 3003` named `crypto-webhook`
+- Ingress may need a route if the Edge Function sends callbacks to the external URL
+
 ## Diagnostics
 
 ### Health Check
 
 ```bash
-# External
-curl -s https://pay.oclawbox.com/api/health | python3 -m json.tool
+# Edge Function
+curl -s https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments/api/health
 
-# In-cluster
+# Config endpoint
+curl -s https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments/api/config
+```
+
+### Database Inspection (Supabase)
+
+Use the Supabase dashboard SQL editor or the API:
+
+```bash
+# List recent payments (via Supabase REST API)
+curl -s "https://wxxnkncwneyhmudfyayd.supabase.co/rest/v1/payments?order=created_at.desc&limit=10" \
+  -H "apikey: <service_role_key>" \
+  -H "Authorization: Bearer <service_role_key>"
+
+# List recent invoices
+curl -s "https://wxxnkncwneyhmudfyayd.supabase.co/rest/v1/invoices?order=created_at.desc&limit=10" \
+  -H "apikey: <service_role_key>" \
+  -H "Authorization: Bearer <service_role_key>"
+```
+
+Or use the Stripe-like API:
+
+```bash
+curl -s "https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments/v1/invoices?limit=10" \
+  -H "x-api-key: cpk_..."
+```
+
+### Edge Function Logs
+
+```bash
+# Tail live logs
+supabase functions logs crypto-payments --tail
+
+# Recent logs
+supabase functions logs crypto-payments
+```
+
+### OpenClawBot Webhook Receiver
+
+```bash
+# Check if webhook server is running (from within the cluster)
 kubectl exec deploy/openclaw-bot -c bot -- \
-  curl -s http://crypto-payments.default.svc.cluster.local:3003/api/health
-```
-
-### Pod Status
-
-```bash
-kubectl get pods -l app=crypto-payments -o wide
-kubectl logs -l app=crypto-payments --tail=50
-kubectl describe pod -l app=crypto-payments
-```
-
-### Database Inspection
-
-```bash
-PAYMENTS_POD=$(kubectl get pods -l app=crypto-payments -o jsonpath='{.items[0].metadata.name}')
-
-# List recent payments
-kubectl exec $PAYMENTS_POD -- node -e "
-const db = require('better-sqlite3')('/data/payments.db');
-console.log(JSON.stringify(db.prepare('SELECT * FROM payments ORDER BY created_at DESC LIMIT 10').all(), null, 2));
-"
-
-# Check pending (unverified) payments
-kubectl exec $PAYMENTS_POD -- node -e "
-const db = require('better-sqlite3')('/data/payments.db');
-console.log(JSON.stringify(db.prepare('SELECT * FROM payments WHERE status = \"pending\"').all(), null, 2));
-"
-```
-
-### Webhook Connectivity Test
-
-```bash
-# From CryptoPayments pod → OpenClawBot webhook endpoint (in-cluster)
-kubectl exec deploy/crypto-payments -- \
   curl -s -o /dev/null -w '%{http_code}' \
-  -X POST http://openclaw-bot.default.svc.cluster.local:3003/crypto/webhook \
+  -X POST http://localhost:3003/crypto/webhook \
   -H "Content-Type: application/json" \
   -d '{}'
-# Expected: 401 (missing signature — proves connectivity)
+# Expected: 401 (missing signature — proves server is listening)
 ```
 
 ### Common Issues
 
 | Symptom | Diagnosis | Fix |
 |---------|-----------|-----|
-| Mini App blank | `BASE_URL` mismatch | Set `BASE_URL=https://pay.oclawbox.com` in deployment |
+| Mini App blank | Edge Function not deployed | Run `pnpm deploy:edge` |
 | Webhook 401 | `CALLBACK_SECRET` mismatch | Ensure same secret in both services |
-| Webhook not received | Network/port issue | Check OpenClawBot webhook server is running on `CRYPTO_WEBHOOK_PORT` |
-| Tx verification fails | RPC endpoint down | Check RPC endpoint, switch to paid provider |
-| `ImagePullBackOff` | GHCR auth | Verify `ghcr-pull` secret exists |
-| Payment stuck "pending" | On-chain verification timeout | Check logs, verify tx on block explorer |
+| Webhook not received | Port 3003 not exposed | Add containerPort + service port in K8s |
+| Tx verification fails | RPC endpoint down | Check logs, switch to paid RPC provider |
+| Import error in Edge Function | Missing `npm:` specifier | Update `deno.json` import map |
+| `SUPABASE_URL` not found | Trying to set auto-injected vars | Remove from `supabase secrets set` — these are auto-injected |
+| Payment stuck "pending" | On-chain verification timeout | Check Edge Function logs |
 | Duplicate activation | Should not happen | `crypto_tx_hash` UNIQUE constraint prevents this |
 
-### Verify TLS
+## File Map
 
-```bash
-curl -sv https://pay.oclawbox.com 2>&1 | grep -E 'subject:|expire|issuer:'
+### CryptoPayments Repo
+
+```
+CryptoPayments/
+  src/
+    config.ts          # Dual-runtime env helper, wallet/RPC/plan config
+    db.ts              # Supabase client, all Stripe-like CRUD operations
+    server.ts          # Hono app, 24 endpoints, sendCallback()
+    telegram.ts        # Async verifyTelegramInitData (Web Crypto API)
+    verify.ts          # On-chain tx verification (EVM/TON/Solana)
+  supabase/
+    config.toml        # Supabase project config
+    schema.sql         # Full Postgres DDL (6 tables + legacy)
+    migrations/        # Applied SQL migrations
+    functions/
+      crypto-payments/
+        index.ts       # Edge Function entry point (19 lines)
+        deno.json      # Deno import map (npm: specifiers)
+        src/           # GITIGNORED — copied from src/ at deploy time
+  scripts/
+    crypto-seed.ts     # Wallet generation + geth keystore V3 encryption
+  tests/
+    server.test.ts     # 18 tests
+    telegram.test.ts   # 9 tests
+    verify.test.ts     # 10 tests
+    payments.test.ts   # 8 tests
+  .env                 # Local env vars (never commit)
+  deno.json            # Root import map
+  tsconfig.json        # allowImportingTsExtensions, noEmit
+  package.json         # Scripts: dev, build, test, deploy:edge
 ```
 
-TLS is provided by the cluster-wide wildcard cert `*.oclawbox.com` (Let's Encrypt via cert-manager).
+### OpenClawBot Files (crypto-related)
 
-## Secrets Inventory
-
-| Secret | Namespace | Keys | Used By |
-|--------|-----------|------|---------|
-| `crypto-payments-secret` | `default` | `WALLET_BASE`, `WALLET_ETH`, `WALLET_TON`, `WALLET_SOL`, `API_KEY`, `CALLBACK_SECRET`, `RPC_*` (optional) | CryptoPayments |
-| `openclaw-bot-secret` | `default` | `TELEGRAM_BOT_TOKEN` (+ existing keys) | Both services |
-
-## Updating / Redeploying
-
-```bash
-# Build and push new image
-docker build -t ghcr.io/vibetechnologies/crypto-payments:latest .
-docker push ghcr.io/vibetechnologies/crypto-payments:latest
-
-# Restart deployment to pull latest
-kubectl rollout restart deployment/crypto-payments
-kubectl rollout status deployment/crypto-payments --timeout=120s
-
-# Verify
-curl -s https://pay.oclawbox.com/api/health
+```
+OpenClawBot/
+  src/
+    config.ts                     # Lines 143-205: crypto config loading
+    index.ts                      # Crypto webhook HTTP server + shutdown
+    commands/plans.ts             # Line 217: Mini App URL construction
+    payments/
+      wallet-pay-flow.ts          # "Pay with Crypto" button
+      crypto-webhook.ts           # Webhook handler (310 LOC)
+      success.ts                  # "crypto" payment method routing
+    db/
+      schema.ts                   # cryptoTxHash column
+      client.ts                   # Migration + unique index
+      payments.ts                 # getPaymentByCryptoTxHash()
+  tests/
+    crypto-webhook.test.ts        # 20+ tests
+  k8s/bot/
+    deployment.yaml               # Needs crypto env vars + containerPort 3003
+    service.yaml                  # Needs port 3003
+    ingress.yaml                  # May need webhook route
+  .github/workflows/bot-image.yml # Needs crypto secret sync
 ```
 
 ## Running Tests
 
-### CryptoPayments (48 tests)
+### CryptoPayments (45 tests)
 
 ```bash
 cd /path/to/CryptoPayments
 pnpm test
 ```
 
-### OpenClawBot Crypto Webhook Tests
+### OpenClawBot (212 tests total, including crypto)
 
 ```bash
 cd /path/to/OpenClawBot
-pnpm test tests/crypto-webhook.test.ts
+pnpm test                              # All tests
+pnpm test tests/crypto-webhook.test.ts # Crypto webhook tests only
 ```
