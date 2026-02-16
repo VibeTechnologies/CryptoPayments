@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS payment_intents (
                       'failed',
                       'canceled'
                     )),
-  chain_id        text CHECK (chain_id IS NULL OR chain_id IN ('base', 'eth', 'ton', 'sol')),
+  chain_id        text CHECK (chain_id IS NULL OR chain_id IN ('base', 'eth', 'ton', 'sol', 'base_sepolia')),
   token           text CHECK (token IS NULL OR token IN ('usdt', 'usdc')),
   tx_hash         text,
   from_address    text,
