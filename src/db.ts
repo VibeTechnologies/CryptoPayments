@@ -147,6 +147,28 @@ function prefixedId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
+// ── Stripe-ID → UUID resolver ────────────────────────────────────────────────
+
+const STRIPE_PREFIX_TABLE: Record<string, string> = {
+  cus_: "customers",
+  inv_: "invoices",
+  pi_: "payment_intents",
+  cs_: "checkout_sessions",
+};
+
+/**
+ * Resolve a Stripe-style prefixed ID (e.g. cus_abc123) to the row's UUID.
+ * If already a UUID, returns it as-is. Returns null if not found.
+ */
+async function resolveToUuid(db: DB, id: string | null | undefined): Promise<string | null> {
+  if (!id) return null;
+  const prefix = Object.keys(STRIPE_PREFIX_TABLE).find((p) => id.startsWith(p));
+  if (!prefix) return id; // Already a UUID
+  const table = STRIPE_PREFIX_TABLE[prefix];
+  const { data } = await db.from(table).select("id").eq("stripe_id", id).single();
+  return data?.id ?? null;
+}
+
 // ── Database client ──────────────────────────────────────────────────────────
 
 export function createDB(supabaseUrl: string, supabaseKey: string): DB {
@@ -406,12 +428,16 @@ export async function createPaymentIntent(
     metadata?: Record<string, unknown>;
   },
 ): Promise<PaymentIntentRecord> {
+  // Resolve stripe_ids (cus_..., inv_...) to UUIDs for FK columns
+  const customerId = await resolveToUuid(db, input.customerId);
+  const invoiceId = await resolveToUuid(db, input.invoiceId);
+
   const { data, error } = await db
     .from("payment_intents")
     .insert({
       stripe_id: prefixedId("pi"),
-      customer_id: input.customerId ?? null,
-      invoice_id: input.invoiceId ?? null,
+      customer_id: customerId,
+      invoice_id: invoiceId,
       amount: input.amount,
       chain_id: input.chainId ?? null,
       token: input.token ?? null,
@@ -522,13 +548,18 @@ export async function createCheckoutSession(
   const expiresAt = new Date(Date.now() + (input.expiresInMinutes ?? 30) * 60 * 1000).toISOString();
   const url = `${baseUrl}/checkout/${stripeId}`;
 
+  // Resolve stripe_ids (cus_..., inv_..., pi_...) to UUIDs for FK columns
+  const customerId = await resolveToUuid(db, input.customerId);
+  const invoiceId = await resolveToUuid(db, input.invoiceId);
+  const paymentIntentId = await resolveToUuid(db, input.paymentIntentId);
+
   const { data, error } = await db
     .from("checkout_sessions")
     .insert({
       stripe_id: stripeId,
-      customer_id: input.customerId ?? null,
-      invoice_id: input.invoiceId ?? null,
-      payment_intent_id: input.paymentIntentId ?? null,
+      customer_id: customerId,
+      invoice_id: invoiceId,
+      payment_intent_id: paymentIntentId,
       plan_id: input.planId ?? null,
       amount: input.amount,
       success_url: input.successUrl ?? null,
@@ -557,11 +588,12 @@ export async function completeCheckoutSession(
   paymentIntentId: string,
 ): Promise<CheckoutSessionRecord> {
   const column = id.startsWith("cs_") ? "stripe_id" : "id";
+  const resolvedPiId = await resolveToUuid(db, paymentIntentId);
   const { data, error } = await db
     .from("checkout_sessions")
     .update({
       status: "complete",
-      payment_intent_id: paymentIntentId,
+      payment_intent_id: resolvedPiId,
       completed_at: new Date().toISOString(),
     })
     .eq(column, id)
