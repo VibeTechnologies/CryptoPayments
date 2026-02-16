@@ -263,6 +263,17 @@ describe("Server API", () => {
     });
   });
 
+  describe("GET /pay", () => {
+    it("returns same HTML payment page as /", async () => {
+      const res = await app.request("/pay?plan=starter&uid=123");
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain("Pay with Crypto");
+      expect(html).toContain("telegram-web-app.js");
+      expect(html).toContain("OpenClaw");
+    });
+  });
+
   // ── POST /api/payment ──
 
   describe("POST /api/payment", () => {
