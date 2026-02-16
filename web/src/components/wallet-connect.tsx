@@ -131,8 +131,7 @@ export function WalletConnect({
                 className="text-accent underline hover:text-accent-hover"
               >
                 Install {walletInfo.name}
-              </a>{" "}
-              or use manual payment below.
+              </a>
             </p>
           )}
         </>
