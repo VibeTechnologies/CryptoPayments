@@ -557,6 +557,7 @@ export async function createCheckoutSession(
     .from("checkout_sessions")
     .insert({
       stripe_id: stripeId,
+      status: "open",
       customer_id: customerId,
       invoice_id: invoiceId,
       payment_intent_id: paymentIntentId,
