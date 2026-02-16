@@ -112,13 +112,13 @@ describe("WalletConnect", () => {
   it("shows error when EVM connection fails", async () => {
     const user = userEvent.setup();
     vi.mocked(isEvmAvailable).mockReturnValue(true);
-    vi.mocked(connectEvm).mockRejectedValue(new Error("User rejected"));
+    vi.mocked(connectEvm).mockRejectedValue(new Error("Unknown wallet error"));
 
     const onStatus = vi.fn();
     render(<WalletConnect {...defaultProps} chain="base" onStatus={onStatus} />);
 
     await user.click(screen.getByText("Connect Wallet"));
-    expect(onStatus).toHaveBeenCalledWith("error", "User rejected");
+    expect(onStatus).toHaveBeenCalledWith("error", "Unknown wallet error");
   });
 
   it("connects Phantom and shows address on click", async () => {
@@ -188,5 +188,64 @@ describe("WalletConnect", () => {
     await user.click(screen.getByText("Connect Wallet"));
     await user.click(screen.getByText("Pay $10.00 USDC"));
     expect(onStatus).toHaveBeenCalledWith("error", "Insufficient balance");
+  });
+
+  it("resets wallet state when chain changes", async () => {
+    const user = userEvent.setup();
+    vi.mocked(isEvmAvailable).mockReturnValue(true);
+    vi.mocked(connectEvm).mockResolvedValue({
+      signer: {} as any,
+      address: "0x1234567890abcdef1234567890abcdef12345678",
+    });
+
+    const { rerender } = render(<WalletConnect {...defaultProps} chain="base" />);
+
+    // Connect on Base
+    await user.click(screen.getByText("Connect Wallet"));
+    expect(screen.getByText(/0x1234/)).toBeInTheDocument();
+
+    // Switch to Solana — connected state should reset
+    vi.mocked(isSolanaAvailable).mockReturnValue(false);
+    rerender(<WalletConnect {...defaultProps} chain="sol" />);
+    expect(screen.queryByText(/0x1234/)).not.toBeInTheDocument();
+    expect(screen.getByText("Connect Phantom")).toBeInTheDocument();
+  });
+
+  it("shows friendly error for user rejection (ACTION_REJECTED)", async () => {
+    const user = userEvent.setup();
+    vi.mocked(isEvmAvailable).mockReturnValue(true);
+    vi.mocked(connectEvm).mockResolvedValue({
+      signer: {} as any,
+      address: "0x1234567890abcdef1234567890abcdef12345678",
+    });
+    vi.mocked(sendEvmTransfer).mockRejectedValue(
+      new Error('user rejected action (action="sendTransaction", reason="rejected", code=ACTION_REJECTED, version=6.16.0)'),
+    );
+
+    const onStatus = vi.fn();
+    render(<WalletConnect {...defaultProps} chain="base" onStatus={onStatus} />);
+
+    await user.click(screen.getByText("Connect Wallet"));
+    await user.click(screen.getByText("Pay $10.00 USDC"));
+    expect(onStatus).toHaveBeenCalledWith("error", "Transaction cancelled");
+  });
+
+  it("shows friendly error for insufficient funds", async () => {
+    const user = userEvent.setup();
+    vi.mocked(isEvmAvailable).mockReturnValue(true);
+    vi.mocked(connectEvm).mockResolvedValue({
+      signer: {} as any,
+      address: "0x1234567890abcdef1234567890abcdef12345678",
+    });
+    vi.mocked(sendEvmTransfer).mockRejectedValue(
+      new Error("insufficient funds for intrinsic transaction cost (code=INSUFFICIENT_FUNDS)"),
+    );
+
+    const onStatus = vi.fn();
+    render(<WalletConnect {...defaultProps} chain="base" onStatus={onStatus} />);
+
+    await user.click(screen.getByText("Connect Wallet"));
+    await user.click(screen.getByText("Pay $10.00 USDC"));
+    expect(onStatus).toHaveBeenCalledWith("error", "Insufficient funds for this transaction");
   });
 });

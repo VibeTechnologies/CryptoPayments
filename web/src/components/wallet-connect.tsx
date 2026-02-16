@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { ChainId, TokenId } from "@/lib/config";
 import { EVM_CHAINS } from "@/lib/config";
 import { isEvmAvailable, connectEvm, sendEvmTransfer } from "@/lib/wallets/evm";
@@ -13,6 +13,25 @@ const INSTALL_URLS: Record<string, { name: string; url: string }> = {
   sol: { name: "Phantom", url: "https://phantom.app/download" },
   ton: { name: "Tonkeeper", url: "https://tonkeeper.com/" },
 };
+
+/** Map raw wallet/ethers errors to user-friendly messages */
+function friendlyError(err: unknown): string {
+  if (!(err instanceof Error)) return "Transaction failed";
+  const msg = err.message;
+  // EIP-1193 user rejection (code 4001) or ethers ACTION_REJECTED
+  if (msg.includes("ACTION_REJECTED") || msg.includes("User rejected") || msg.includes("user rejected")) {
+    return "Transaction cancelled";
+  }
+  // ethers INSUFFICIENT_FUNDS
+  if (msg.includes("INSUFFICIENT_FUNDS") || msg.includes("insufficient funds")) {
+    return "Insufficient funds for this transaction";
+  }
+  // Network / RPC errors
+  if (msg.includes("NETWORK_ERROR") || msg.includes("network changed")) {
+    return "Network error. Please check your wallet connection.";
+  }
+  return msg;
+}
 
 interface WalletConnectProps {
   chain: ChainId;
@@ -38,10 +57,21 @@ export function WalletConnect({
   const [connectedAddress, setConnectedAddress] = useState<string | null>(null);
   const [evmSigner, setEvmSigner] = useState<Signer | null>(null);
   const [sending, setSending] = useState(false);
+  const prevChainRef = useRef(chain);
 
   const isEvm = EVM_CHAINS.includes(chain);
   const isSol = chain === "sol";
   const isTon = chain === "ton";
+
+  // Reset wallet state when chain changes
+  useEffect(() => {
+    if (prevChainRef.current !== chain) {
+      setConnectedAddress(null);
+      setEvmSigner(null);
+      setSending(false);
+      prevChainRef.current = chain;
+    }
+  }, [chain]);
 
   // Check extension availability
   const hasEvmWallet = isEvm && isEvmAvailable();
@@ -71,7 +101,7 @@ export function WalletConnect({
         onStatus("pending", `Connected: ${address.slice(0, 6)}...${address.slice(-4)}`);
       }
     } catch (err) {
-      onStatus("error", err instanceof Error ? err.message : "Connection failed");
+      onStatus("error", friendlyError(err));
     }
   }
 
@@ -92,7 +122,7 @@ export function WalletConnect({
 
       onTxSent(txHash);
     } catch (err) {
-      onStatus("error", err instanceof Error ? err.message : "Transaction failed");
+      onStatus("error", friendlyError(err));
     } finally {
       setSending(false);
     }
