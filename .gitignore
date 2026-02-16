@@ -5,3 +5,5 @@ data/
 .DS_Store
 *.log
 .secrets/
+supabase/.temp/
+supabase/functions/crypto-payments/src/

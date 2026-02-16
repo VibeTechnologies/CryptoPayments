@@ -1,5 +1,3 @@
-import { createHmac } from "node:crypto";
-
 export interface TelegramUser {
   id: number;
   first_name: string;
@@ -17,6 +15,23 @@ export interface InitDataResult {
   startParam?: string;
 }
 
+/** Compute HMAC-SHA256 using the Web Crypto API (works in Node 22+, Deno, and Edge Functions) */
+async function hmacSha256(key: BufferSource, data: string): Promise<ArrayBuffer> {
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    key,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  return crypto.subtle.sign("HMAC", cryptoKey, new TextEncoder().encode(data));
+}
+
+/** Convert ArrayBuffer to hex string */
+function bufToHex(buf: ArrayBuffer): string {
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /**
  * Verify Telegram Mini App initData.
  *
@@ -30,11 +45,11 @@ export interface InitDataResult {
  * 7. Compare calculated_hash === hash
  * 8. Check auth_date is recent (< 1 hour)
  */
-export function verifyTelegramInitData(
+export async function verifyTelegramInitData(
   initData: string,
   botToken: string,
   maxAgeSeconds = 3600,
-): InitDataResult {
+): Promise<InitDataResult> {
   const params = new URLSearchParams(initData);
   const hash = params.get("hash");
   if (!hash) return { valid: false };
@@ -48,11 +63,9 @@ export function verifyTelegramInitData(
   entries.sort();
   const dataCheckString = entries.join("\n");
 
-  // HMAC verification
-  const secretKey = createHmac("sha256", "WebAppData").update(botToken).digest();
-  const calculatedHash = createHmac("sha256", secretKey)
-    .update(dataCheckString)
-    .digest("hex");
+  // HMAC verification using Web Crypto API
+  const secretKey = await hmacSha256(new TextEncoder().encode("WebAppData"), botToken);
+  const calculatedHash = bufToHex(await hmacSha256(secretKey, dataCheckString));
 
   if (calculatedHash !== hash) {
     return { valid: false };

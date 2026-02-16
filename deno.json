@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "jsx": "react-jsx"
+  },
+  "imports": {
+    "hono": "npm:hono@4",
+    "hono/cors": "npm:hono@4/cors",
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2",
+    "viem": "npm:viem@2",
+    "viem/chains": "npm:viem@2/chains"
+  },
+  "lint": {
+    "rules": {
+      "exclude": ["no-explicit-any"]
+    }
+  }
+}

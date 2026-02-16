@@ -41,14 +41,14 @@ describe("verifyTelegramInitData", () => {
     language_code: "en",
   });
 
-  it("accepts valid initData with fresh auth_date", () => {
+  it("accepts valid initData with fresh auth_date", async () => {
     const initData = buildInitData({
       auth_date: String(now),
       user,
       query_id: "AAHdF6IQ",
     });
 
-    const result = verifyTelegramInitData(initData, BOT_TOKEN);
+    const result = await verifyTelegramInitData(initData, BOT_TOKEN);
 
     expect(result.valid).toBe(true);
     expect(result.user).toBeDefined();
@@ -58,27 +58,27 @@ describe("verifyTelegramInitData", () => {
     expect(result.queryId).toBe("AAHdF6IQ");
   });
 
-  it("rejects initData with wrong bot token", () => {
+  it("rejects initData with wrong bot token", async () => {
     const initData = buildInitData({
       auth_date: String(now),
       user,
     });
 
-    const result = verifyTelegramInitData(initData, "wrong:token");
+    const result = await verifyTelegramInitData(initData, "wrong:token");
     expect(result.valid).toBe(false);
   });
 
-  it("rejects initData without hash", () => {
+  it("rejects initData without hash", async () => {
     const sp = new URLSearchParams({
       auth_date: String(now),
       user,
     });
 
-    const result = verifyTelegramInitData(sp.toString(), BOT_TOKEN);
+    const result = await verifyTelegramInitData(sp.toString(), BOT_TOKEN);
     expect(result.valid).toBe(false);
   });
 
-  it("rejects initData with tampered data", () => {
+  it("rejects initData with tampered data", async () => {
     const initData = buildInitData({
       auth_date: String(now),
       user,
@@ -87,63 +87,63 @@ describe("verifyTelegramInitData", () => {
     // Tamper with the user field
     const tampered = initData.replace("testuser", "hacker");
 
-    const result = verifyTelegramInitData(tampered, BOT_TOKEN);
+    const result = await verifyTelegramInitData(tampered, BOT_TOKEN);
     expect(result.valid).toBe(false);
   });
 
-  it("rejects expired initData (> maxAgeSeconds)", () => {
+  it("rejects expired initData (> maxAgeSeconds)", async () => {
     const oldDate = now - 7200; // 2 hours ago
     const initData = buildInitData({
       auth_date: String(oldDate),
       user,
     });
 
-    const result = verifyTelegramInitData(initData, BOT_TOKEN, 3600);
+    const result = await verifyTelegramInitData(initData, BOT_TOKEN, 3600);
     expect(result.valid).toBe(false);
   });
 
-  it("accepts initData within custom maxAgeSeconds", () => {
+  it("accepts initData within custom maxAgeSeconds", async () => {
     const recentDate = now - 100;
     const initData = buildInitData({
       auth_date: String(recentDate),
       user,
     });
 
-    const result = verifyTelegramInitData(initData, BOT_TOKEN, 300);
+    const result = await verifyTelegramInitData(initData, BOT_TOKEN, 300);
     expect(result.valid).toBe(true);
   });
 
-  it("handles initData without user field", () => {
+  it("handles initData without user field", async () => {
     const initData = buildInitData({
       auth_date: String(now),
       query_id: "test123",
     });
 
-    const result = verifyTelegramInitData(initData, BOT_TOKEN);
+    const result = await verifyTelegramInitData(initData, BOT_TOKEN);
     expect(result.valid).toBe(true);
     expect(result.user).toBeUndefined();
     expect(result.queryId).toBe("test123");
   });
 
-  it("handles start_param", () => {
+  it("handles start_param", async () => {
     const initData = buildInitData({
       auth_date: String(now),
       user,
       start_param: "pro_123456",
     });
 
-    const result = verifyTelegramInitData(initData, BOT_TOKEN);
+    const result = await verifyTelegramInitData(initData, BOT_TOKEN);
     expect(result.valid).toBe(true);
     expect(result.startParam).toBe("pro_123456");
   });
 
-  it("handles malformed user JSON gracefully", () => {
+  it("handles malformed user JSON gracefully", async () => {
     const initData = buildInitData({
       auth_date: String(now),
       user: "not-valid-json",
     });
 
-    const result = verifyTelegramInitData(initData, BOT_TOKEN);
+    const result = await verifyTelegramInitData(initData, BOT_TOKEN);
     expect(result.valid).toBe(true);
     expect(result.user).toBeUndefined();
   });

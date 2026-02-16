@@ -1,5 +1,4 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { randomUUID } from "node:crypto";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -145,7 +144,7 @@ export interface InsertPayment {
 // ── Prefix ID generation (client-side fallback) ──────────────────────────────
 
 function prefixedId(prefix: string): string {
-  return `${prefix}_${randomUUID().replace(/-/g, "")}`;
+  return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
 // ── Database client ──────────────────────────────────────────────────────────

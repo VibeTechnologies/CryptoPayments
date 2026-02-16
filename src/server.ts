@@ -1,9 +1,6 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
-import { serve } from "@hono/node-server";
-import { serveStatic } from "@hono/node-server/serve-static";
-import { createHmac } from "node:crypto";
-import { loadConfig, type ChainId, type TokenId, TOKEN_ADDRESSES } from "./config.js";
+import { loadConfig, type ChainId, type TokenId, TOKEN_ADDRESSES } from "./config.ts";
 import {
   createDB,
   type DB,
@@ -36,9 +33,9 @@ import {
   listWebhookEvents,
   createWebhookEvent,
   type PaymentRecord,
-} from "./db.js";
-import { verifyTransfer, resolveplan } from "./verify.js";
-import { verifyTelegramInitData } from "./telegram.js";
+} from "./db.ts";
+import { verifyTransfer, resolveplan } from "./verify.ts";
+import { verifyTelegramInitData } from "./telegram.ts";
 
 const config = loadConfig();
 const db = createDB(config.supabaseUrl, config.supabaseKey);
@@ -107,7 +104,7 @@ export function createApp(injectedDb?: DB) {
 
     // ── Auth (optional but recommended) ──
     if (body.initData && config.telegramBotToken) {
-      const result = verifyTelegramInitData(body.initData, config.telegramBotToken);
+      const result = await verifyTelegramInitData(body.initData, config.telegramBotToken);
       if (!result.valid) {
         return c.json({ error: "Invalid Telegram initData" }, 401);
       }
@@ -539,14 +536,23 @@ export function createApp(injectedDb?: DB) {
 
   app.get("/", (c) => c.html(paymentPageHtml()));
 
-  // ── Static files ───────────────────────────────────────────────────────────
-
-  app.use("/*", serveStatic({ root: "./public" }));
-
   return app;
 }
 
 // ── Webhook callback ─────────────────────────────────────────────────────────
+
+/** Compute HMAC-SHA256 using the Web Crypto API */
+async function hmacSha256Hex(secret: string, message: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 async function sendCallback(callbackUrl: string, payment: PaymentRecord): Promise<void> {
   const timestamp = Math.floor(Date.now() / 1000).toString();
@@ -565,9 +571,7 @@ async function sendCallback(callbackUrl: string, payment: PaymentRecord): Promis
     timestamp,
   });
 
-  const signature = createHmac("sha256", config.callbackSecret)
-    .update(payload)
-    .digest("hex");
+  const signature = await hmacSha256Hex(config.callbackSecret, payload);
 
   const resp = await fetch(callbackUrl, {
     method: "POST",
@@ -1140,12 +1144,18 @@ function paymentPageHtml(): string {
 </html>`;
 }
 
-// ── Start server ─────────────────────────────────────────────────────────────
+// ── Module exports ───────────────────────────────────────────────────────────
 
 const app = createApp();
-
-console.log(`CryptoPayments server starting on port ${config.port}`);
-serve({ fetch: app.fetch, port: config.port });
-console.log(`CryptoPayments server running at http://localhost:${config.port}`);
-
 export { app, config };
+
+// ── Node.js server startup (skipped when imported as a module in Deno/Edge) ──
+
+const g = globalThis as Record<string, unknown>;
+if (!g.Deno && g.process) {
+  import("@hono/node-server").then(({ serve }) => {
+    serve({ fetch: app.fetch, port: config.port }, () => {
+      console.log(`Listening on http://localhost:${config.port}`);
+    });
+  });
+}
