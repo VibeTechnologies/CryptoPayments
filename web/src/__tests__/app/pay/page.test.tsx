@@ -1,3 +1,4 @@
+import React from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -19,6 +20,16 @@ vi.mock("@/lib/wallets/solana", () => ({
   isSolanaAvailable: vi.fn(() => false),
   connectSolana: vi.fn(),
   sendSolanaTransfer: vi.fn(),
+}));
+
+vi.mock("@/lib/wallets/ton", () => ({
+  buildTonTransferMessage: vi.fn(),
+}));
+
+vi.mock("@tonconnect/ui-react", () => ({
+  useTonConnectUI: () => [{ openModal: vi.fn(), sendTransaction: vi.fn() }, vi.fn()],
+  useTonAddress: () => "",
+  TonConnectUIProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
 import { fetchConfig } from "@/lib/api";

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { WalletConnect } from "@/components/wallet-connect";
@@ -17,8 +17,31 @@ vi.mock("@/lib/wallets/solana", () => ({
   sendSolanaTransfer: vi.fn(),
 }));
 
+vi.mock("@/lib/wallets/ton", () => ({
+  isTonAvailable: vi.fn(() => true),
+  buildTonTransferMessage: vi.fn(() => ({
+    validUntil: 1234567890,
+    messages: [{ address: "EQ...", amount: "50000000", payload: "base64boc" }],
+  })),
+}));
+
+// Mock TonConnect hooks
+const mockOpenModal = vi.fn();
+const mockSendTransaction = vi.fn();
+let mockTonAddress = "";
+
+vi.mock("@tonconnect/ui-react", () => ({
+  useTonConnectUI: () => [
+    { openModal: mockOpenModal, sendTransaction: mockSendTransaction },
+    vi.fn(),
+  ],
+  useTonAddress: () => mockTonAddress,
+  TonConnectUIProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
 import { isEvmAvailable, connectEvm, sendEvmTransfer } from "@/lib/wallets/evm";
 import { isSolanaAvailable, connectSolana, sendSolanaTransfer } from "@/lib/wallets/solana";
+import { buildTonTransferMessage } from "@/lib/wallets/ton";
 
 const defaultProps = {
   chain: "base" as const,
@@ -33,6 +56,7 @@ const defaultProps = {
 describe("WalletConnect", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockTonAddress = "";
   });
 
   it("always shows Connect Wallet button for EVM chains", () => {
@@ -91,6 +115,11 @@ describe("WalletConnect", () => {
   it("shows Connect TON Wallet button for TON chain", () => {
     render(<WalletConnect {...defaultProps} chain="ton" />);
     expect(screen.getByText("Connect TON Wallet")).toBeInTheDocument();
+  });
+
+  it("does not show install prompt for TON (uses TonConnect QR)", () => {
+    render(<WalletConnect {...defaultProps} chain="ton" />);
+    expect(screen.queryByText(/Tonkeeper not detected/i)).not.toBeInTheDocument();
   });
 
   it("connects EVM wallet and shows address on click", async () => {
@@ -247,5 +276,69 @@ describe("WalletConnect", () => {
     await user.click(screen.getByText("Connect Wallet"));
     await user.click(screen.getByText("Pay $10.00 USDC"));
     expect(onStatus).toHaveBeenCalledWith("error", "Insufficient funds for this transaction");
+  });
+
+  // --- TON Connect tests ---
+
+  it("opens TonConnect modal when clicking Connect TON Wallet", async () => {
+    const user = userEvent.setup();
+    render(<WalletConnect {...defaultProps} chain="ton" />);
+
+    await user.click(screen.getByText("Connect TON Wallet"));
+    expect(mockOpenModal).toHaveBeenCalled();
+  });
+
+  it("shows connected TON address from TonConnect hook", () => {
+    mockTonAddress = "0:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+    render(<WalletConnect {...defaultProps} chain="ton" />);
+
+    // Should show truncated address and Pay button
+    expect(screen.getByText(/0:1234/)).toBeInTheDocument();
+    expect(screen.getByText("Pay $10.00 USDC")).toBeInTheDocument();
+  });
+
+  it("sends TON jetton transfer via TonConnect", async () => {
+    const user = userEvent.setup();
+    mockTonAddress = "0:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+    mockSendTransaction.mockResolvedValue({ boc: "te6cckEBAQEA..." });
+
+    const onTxSent = vi.fn();
+    render(
+      <WalletConnect
+        {...defaultProps}
+        chain="ton"
+        tokenAddress="EQJettonAddr"
+        walletAddress="EQDestAddr"
+        onTxSent={onTxSent}
+      />,
+    );
+
+    // Should already show connected state from tonAddress hook
+    await user.click(screen.getByText("Pay $10.00 USDC"));
+
+    expect(buildTonTransferMessage).toHaveBeenCalledWith({
+      jettonAddress: "EQJettonAddr",
+      toAddress: "EQDestAddr",
+      amountUsd: 10,
+    });
+    expect(mockSendTransaction).toHaveBeenCalledWith({
+      validUntil: 1234567890,
+      messages: [{ address: "EQ...", amount: "50000000", payload: "base64boc" }],
+    });
+    expect(onTxSent).toHaveBeenCalledWith("te6cckEBAQEA...");
+  });
+
+  it("shows friendly error when TON transaction is rejected", async () => {
+    const user = userEvent.setup();
+    mockTonAddress = "0:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+    mockSendTransaction.mockRejectedValue(new Error("User rejected the transaction"));
+
+    const onStatus = vi.fn();
+    render(
+      <WalletConnect {...defaultProps} chain="ton" onStatus={onStatus} />,
+    );
+
+    await user.click(screen.getByText("Pay $10.00 USDC"));
+    expect(onStatus).toHaveBeenCalledWith("error", "Transaction cancelled");
   });
 });

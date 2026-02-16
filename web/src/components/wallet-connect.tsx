@@ -5,6 +5,8 @@ import type { ChainId, TokenId } from "@/lib/config";
 import { EVM_CHAINS } from "@/lib/config";
 import { isEvmAvailable, connectEvm, sendEvmTransfer } from "@/lib/wallets/evm";
 import { isSolanaAvailable, connectSolana, sendSolanaTransfer } from "@/lib/wallets/solana";
+import { buildTonTransferMessage } from "@/lib/wallets/ton";
+import { useTonConnectUI, useTonAddress } from "@tonconnect/ui-react";
 import type { StatusType } from "./status-message";
 import type { Signer } from "ethers";
 
@@ -59,6 +61,10 @@ export function WalletConnect({
   const [sending, setSending] = useState(false);
   const prevChainRef = useRef(chain);
 
+  // TonConnect hooks
+  const [tonConnectUI] = useTonConnectUI();
+  const tonAddress = useTonAddress(false); // raw address
+
   const isEvm = EVM_CHAINS.includes(chain);
   const isSol = chain === "sol";
   const isTon = chain === "ton";
@@ -73,6 +79,13 @@ export function WalletConnect({
     }
   }, [chain]);
 
+  // Sync TON connected address from TonConnect
+  useEffect(() => {
+    if (isTon && tonAddress) {
+      setConnectedAddress(tonAddress);
+    }
+  }, [isTon, tonAddress]);
+
   // Check extension availability
   const hasEvmWallet = isEvm && isEvmAvailable();
   const hasSolWallet = isSol && isSolanaAvailable();
@@ -80,6 +93,7 @@ export function WalletConnect({
   // Determine wallet type for install prompt
   const walletType = isEvm ? "evm" : isSol ? "sol" : "ton";
   const walletInfo = INSTALL_URLS[walletType];
+  // TON uses TonConnect (QR + deep links), always available
   const hasExtension = hasEvmWallet || hasSolWallet || isTon;
 
   async function handleConnect() {
@@ -99,6 +113,9 @@ export function WalletConnect({
         const { address } = await connectSolana();
         setConnectedAddress(address);
         onStatus("pending", `Connected: ${address.slice(0, 6)}...${address.slice(-4)}`);
+      } else if (isTon) {
+        // Open TonConnect modal (QR code / wallet list)
+        await tonConnectUI.openModal();
       }
     } catch (err) {
       onStatus("error", friendlyError(err));
@@ -116,6 +133,17 @@ export function WalletConnect({
       } else if (isSol) {
         const mintAddr = tokenAddress;
         txHash = await sendSolanaTransfer(mintAddr, walletAddress, amount);
+      } else if (isTon) {
+        // Build TEP-74 jetton transfer message and send via TonConnect
+        const txMessage = buildTonTransferMessage({
+          jettonAddress: tokenAddress,
+          toAddress: walletAddress,
+          amountUsd: amount,
+        });
+        const result = await tonConnectUI.sendTransaction(txMessage);
+        // TonConnect returns { boc: string } — the signed transaction BOC
+        // Use BOC as the transaction identifier for verification
+        txHash = result.boc;
       } else {
         throw new Error("Wallet not connected");
       }
