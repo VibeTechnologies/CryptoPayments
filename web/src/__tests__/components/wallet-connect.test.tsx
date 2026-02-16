@@ -275,7 +275,31 @@ describe("WalletConnect", () => {
 
     await user.click(screen.getByText("Connect Wallet"));
     await user.click(screen.getByText("Pay $10.00 USDC"));
-    expect(onStatus).toHaveBeenCalledWith("error", "Insufficient funds for this transaction");
+    expect(onStatus).toHaveBeenCalledWith("error", "Insufficient funds for gas fees");
+  });
+
+  it("shows friendly error for ERC20 transfer amount exceeds balance", async () => {
+    const user = userEvent.setup();
+    vi.mocked(isEvmAvailable).mockReturnValue(true);
+    vi.mocked(connectEvm).mockResolvedValue({
+      signer: {} as any,
+      address: "0x1234567890abcdef1234567890abcdef12345678",
+    });
+    vi.mocked(sendEvmTransfer).mockRejectedValue(
+      new Error(
+        'execution reverted: "ERC20: transfer amount exceeds balance" (action="estimateGas", code=CALL_EXCEPTION)',
+      ),
+    );
+
+    const onStatus = vi.fn();
+    render(<WalletConnect {...defaultProps} chain="base" onStatus={onStatus} />);
+
+    await user.click(screen.getByText("Connect Wallet"));
+    await user.click(screen.getByText("Pay $10.00 USDC"));
+    expect(onStatus).toHaveBeenCalledWith(
+      "error",
+      "Insufficient token balance. Please fund your wallet and try again.",
+    );
   });
 
   // --- TON Connect tests ---
