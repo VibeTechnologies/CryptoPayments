@@ -8,7 +8,9 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "predeploy:edge": "rm -rf supabase/functions/crypto-payments/src && cp -r src supabase/functions/crypto-payments/src",
+    "deploy:edge": "supabase functions deploy crypto-payments --no-verify-jwt"
   },
   "dependencies": {
     "@hono/node-server": "^1.14.1",
