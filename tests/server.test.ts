@@ -248,6 +248,32 @@ describe("Server API", () => {
       expect(body.prices.max).toBe(100);
       expect(body.chains).toEqual(["base", "eth", "ton", "sol", "base_sepolia"]);
     });
+
+    it("returns wallet addresses for all chains", async () => {
+      const res = await app.request("/api/config");
+      const body = await res.json();
+      expect(body.wallets.base).toBe("0xTestBaseWallet");
+      expect(body.wallets.eth).toBe("0xTestEthWallet");
+      expect(body.wallets.ton).toBe("EQTestTonWallet");
+      expect(body.wallets.sol).toBe("TestSolWallet");
+      // base_sepolia falls back to WALLET_BASE when WALLET_BASE_SEPOLIA is not set
+      expect(body.wallets.base_sepolia).toBe("0xTestBaseWallet");
+    });
+
+    it("returns TOKEN_ADDRESSES for all chains", async () => {
+      const res = await app.request("/api/config");
+      const body = await res.json();
+      expect(body.tokens).toBeDefined();
+      // Verify all 5 chains have usdt + usdc entries
+      for (const chain of ["base", "eth", "ton", "sol", "base_sepolia"]) {
+        expect(body.tokens[chain]).toBeDefined();
+        expect(body.tokens[chain].usdt).toBeDefined();
+        expect(body.tokens[chain].usdc).toBeDefined();
+      }
+      // Spot-check known contract addresses
+      expect(body.tokens.base.usdc).toBe("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+      expect(body.tokens.base_sepolia.usdc).toBe("0x036CbD53842c5426634e7929541eC2318f3dCF7e");
+    });
   });
 
   // ── Payment page ──
@@ -260,6 +286,40 @@ describe("Server API", () => {
       expect(html).toContain("Pay with Crypto");
       expect(html).toContain("telegram-web-app.js");
       expect(html).toContain("OpenClaw");
+    });
+
+    it("returns text/html Content-Type", async () => {
+      const res = await app.request("/");
+      expect(res.headers.get("content-type")).toContain("text/html");
+    });
+
+    it("contains all critical DOM element IDs", async () => {
+      const res = await app.request("/");
+      const html = await res.text();
+      for (const id of [
+        "walletAddress",
+        "txHashInput",
+        "submitBtn",
+        "chainBadges",
+        "amountDisplay",
+        "tokenDisplay",
+        "userInfo",
+        "statusMsg",
+      ]) {
+        expect(html).toContain(`id="${id}"`);
+      }
+    });
+
+    it("contains chain badges for all 5 chains", async () => {
+      const res = await app.request("/");
+      const html = await res.text();
+      for (const chain of ["base", "eth", "sol", "ton", "base_sepolia"]) {
+        expect(html).toContain(`data-chain="${chain}"`);
+      }
+      // Verify human-readable chain names are present
+      for (const name of ["Base", "Ethereum", "Solana", "TON", "Base Sepolia"]) {
+        expect(html).toContain(name);
+      }
     });
   });
 
@@ -510,6 +570,121 @@ describe("Server API", () => {
       const body = await res.json();
       expect(body.payment.plan_id).toBe("pro");
     });
+
+    it("rejects missing uid", async () => {
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xabc",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "",
+          apiKey: "test-api-key",
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain("uid");
+    });
+
+    it("rejects missing idType", async () => {
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xabc",
+          chainId: "base",
+          token: "usdc",
+          uid: "123",
+          apiKey: "test-api-key",
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain("idType");
+    });
+
+    it("rejects invalid token value", async () => {
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xabc",
+          chainId: "base",
+          token: "dai",
+          idType: "tg",
+          uid: "123",
+          apiKey: "test-api-key",
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain("token");
+    });
+
+    it("defaults token to usdt when not specified", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdt",
+        blockNumber: 12345,
+        txHash: "0xdefault_token_tx",
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xdefault_token_tx",
+          chainId: "base",
+          // no token field
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          apiKey: "test-api-key",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.payment.status).toBe("verified");
+      expect(body.payment.token).toBe("usdt");
+    });
+
+    it("proceeds without auth when no apiKey or initData provided", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 12345,
+        txHash: "0xnoauth_tx",
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xnoauth_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          // no apiKey, no initData
+        }),
+      });
+
+      // Should NOT return 401 — auth is optional
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.payment.status).toBe("verified");
+    });
   });
 
   // ── GET /api/payment/:id ──
@@ -615,6 +790,202 @@ describe("Server API", () => {
       expect(body.payments).toBeDefined();
       expect(Array.isArray(body.payments)).toBe(true);
       expect(body.payments.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  // ── GET /checkout/:id ──
+
+  describe("GET /checkout/:id", () => {
+    it("returns 404 for non-existent checkout session", async () => {
+      const res = await app.request("/checkout/cs_nonexistent");
+      expect(res.status).toBe(404);
+      const text = await res.text();
+      expect(text).toContain("not found");
+    });
+
+    it("returns 410 for expired checkout session", async () => {
+      // Seed an expired session directly into the mock DB
+      const db = mockDb as any;
+      const table = db.from("checkout_sessions");
+      await table.insert({
+        stripe_id: "cs_expired_test",
+        status: "expired",
+        amount: 1000,
+        plan_id: "starter",
+        url: "http://test/checkout/cs_expired_test",
+        expires_at: new Date(Date.now() - 60000).toISOString(),
+        metadata: {},
+      }).select("*");
+
+      const res = await app.request("/checkout/cs_expired_test");
+      expect(res.status).toBe(410);
+      const text = await res.text();
+      expect(text).toContain("expired");
+    });
+
+    it("returns 200 with completion text for completed session", async () => {
+      const db = mockDb as any;
+      const table = db.from("checkout_sessions");
+      await table.insert({
+        stripe_id: "cs_complete_test",
+        status: "complete",
+        amount: 2500,
+        plan_id: "pro",
+        url: "http://test/checkout/cs_complete_test",
+        expires_at: new Date(Date.now() + 60000).toISOString(),
+        completed_at: new Date().toISOString(),
+        metadata: {},
+      }).select("*");
+
+      const res = await app.request("/checkout/cs_complete_test");
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(text).toContain("already been completed");
+    });
+
+    it("returns HTML checkout page for valid open session", async () => {
+      const db = mockDb as any;
+      const table = db.from("checkout_sessions");
+      await table.insert({
+        stripe_id: "cs_open_test",
+        status: "open",
+        amount: 1000,
+        plan_id: "starter",
+        url: "http://test/checkout/cs_open_test",
+        expires_at: new Date(Date.now() + 1800000).toISOString(),
+        metadata: {},
+      }).select("*");
+
+      const res = await app.request("/checkout/cs_open_test");
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(res.headers.get("content-type")).toContain("text/html");
+      // Verify it contains checkout page elements
+      expect(html).toContain("Checkout");
+      expect(html).toContain("$10.00");
+      expect(html).toContain("Starter");
+      expect(html).toContain("walletAddress");
+      expect(html).toContain("txHashInput");
+      expect(html).toContain("submitBtn");
+      expect(html).toContain("chainBadges");
+    });
+  });
+
+  // ── Callback webhook ──
+
+  describe("Callback webhook", () => {
+    it("sends POST with HMAC signature when callbackUrl is provided", async () => {
+      // Capture the global fetch calls
+      const originalFetch = globalThis.fetch;
+      const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+      globalThis.fetch = vi.fn(async (url: any, init?: any) => {
+        fetchCalls.push({ url: String(url), init });
+        return new Response("OK", { status: 200 });
+      }) as any;
+
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 12345,
+        txHash: "0xcallback_tx",
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xcallback_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          apiKey: "test-api-key",
+          callbackUrl: "https://bot.example.com/webhook",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+
+      // The callback is fired async (sendCallback().catch()), give it a tick
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Find the callback fetch (not the /api/payment request itself)
+      const callbackCall = fetchCalls.find(
+        (c) => c.url === "https://bot.example.com/webhook",
+      );
+      expect(callbackCall).toBeDefined();
+      expect(callbackCall!.init.method).toBe("POST");
+
+      // Verify headers
+      const headers = callbackCall!.init.headers as Record<string, string>;
+      expect(headers["Content-Type"]).toBe("application/json");
+      expect(headers["X-Signature"]).toBeDefined();
+      expect(headers["X-Signature"]).toMatch(/^[a-f0-9]{64}$/); // SHA256 hex
+      expect(headers["X-Timestamp"]).toBeDefined();
+      expect(Number(headers["X-Timestamp"])).toBeGreaterThan(0);
+
+      // Verify body
+      const body = JSON.parse(callbackCall!.init.body as string);
+      expect(body.event).toBe("payment.verified");
+      expect(body.payment).toBeDefined();
+      expect(body.payment.txHash).toBe("0xcallback_tx");
+      expect(body.payment.chain).toBe("base");
+      expect(body.payment.token).toBe("usdc");
+      expect(body.payment.amountUsd).toBe(10);
+      expect(body.payment.plan).toBe("starter");
+      expect(body.payment.uid).toBe("42");
+      expect(body.payment.idType).toBe("tg");
+      expect(body.timestamp).toBeDefined();
+
+      // Restore original fetch
+      globalThis.fetch = originalFetch;
+    });
+
+    it("does NOT send callback when callbackUrl is not provided", async () => {
+      const originalFetch = globalThis.fetch;
+      const fetchCalls: Array<{ url: string }> = [];
+      globalThis.fetch = vi.fn(async (url: any, init?: any) => {
+        fetchCalls.push({ url: String(url) });
+        return new Response("OK", { status: 200 });
+      }) as any;
+
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 12345,
+        txHash: "0xno_callback_tx",
+      });
+
+      await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xno_callback_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          apiKey: "test-api-key",
+          // no callbackUrl
+        }),
+      });
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      const webhookCalls = fetchCalls.filter(
+        (c) => !c.url.includes("supabase"),
+      );
+      expect(webhookCalls.length).toBe(0);
+
+      globalThis.fetch = originalFetch;
     });
   });
 });
