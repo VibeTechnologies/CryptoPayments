@@ -73,7 +73,7 @@ export function createApp(injectedDb?: DB) {
   // ── Health ──────────────────────────────────────────────────────────────────
 
   app.get("/api/health", (c) =>
-    c.json({ ok: true, chains: ["base", "eth", "ton", "sol"], tokens: ["usdt", "usdc"] }),
+    c.json({ ok: true, chains: ["base", "eth", "ton", "sol", "base_sepolia"], tokens: ["usdt", "usdc"] }),
   );
 
   // ── Public config ──────────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ export function createApp(injectedDb?: DB) {
       wallets: config.wallets,
       prices: config.prices,
       tokens: TOKEN_ADDRESSES,
-      chains: ["base", "eth", "ton", "sol"],
+      chains: ["base", "eth", "ton", "sol", "base_sepolia"],
     });
   });
 
@@ -122,8 +122,8 @@ export function createApp(injectedDb?: DB) {
     if (!body.txHash || typeof body.txHash !== "string") {
       return c.json({ error: "txHash is required" }, 400);
     }
-    if (!body.chainId || !["base", "eth", "ton", "sol"].includes(body.chainId)) {
-      return c.json({ error: "chainId must be base, eth, ton, or sol" }, 400);
+    if (!body.chainId || !["base", "eth", "ton", "sol", "base_sepolia"].includes(body.chainId)) {
+      return c.json({ error: "chainId must be base, eth, ton, sol, or base_sepolia" }, 400);
     }
     if (!body.idType || !["tg", "email"].includes(body.idType)) {
       return c.json({ error: "idType must be 'tg' or 'email'" }, 400);
@@ -773,6 +773,7 @@ function checkoutPageHtml(sessionId: string, amountUsd: number, planLabel: strin
         <div class="chain-badge" data-chain="eth" onclick="selectChain('eth')">Ethereum</div>
         <div class="chain-badge" data-chain="sol" onclick="selectChain('sol')">Solana</div>
         <div class="chain-badge" data-chain="ton" onclick="selectChain('ton')">TON</div>
+        <div class="chain-badge" data-chain="base_sepolia" onclick="selectChain('base_sepolia')">Base Sepolia</div>
       </div>
       <label>Token</label>
       <select id="tokenSelect" onchange="updateDisplay()">
@@ -784,7 +785,7 @@ function checkoutPageHtml(sessionId: string, amountUsd: number, planLabel: strin
     <div class="step">
       <div class="step-header"><div class="step-num">2</div><div class="step-title">Send payment</div></div>
       <div class="amount-box">
-        <div class="amount" id="amountDisplay">$${amountUsd.toFixed(2)}</div>
+        <div class="amount" id="amountDisplay">$\${amountUsd.toFixed(2)}</div>
         <div class="token-label" id="tokenDisplay">USDC on Base</div>
       </div>
       <label>Send exactly this amount to</label>
@@ -804,8 +805,8 @@ function checkoutPageHtml(sessionId: string, amountUsd: number, planLabel: strin
   </div>
 
   <script>
-    const sessionId = '${sessionId}';
-    const amount = ${amountUsd};
+    const sessionId = '\${sessionId}';
+    const amount = \${amountUsd};
     let selectedChain = 'base';
     let appConfig = null;
 
@@ -828,7 +829,7 @@ function checkoutPageHtml(sessionId: string, amountUsd: number, planLabel: strin
       const token = document.getElementById('tokenSelect').value;
       document.getElementById('walletAddress').textContent = appConfig.wallets[selectedChain] || 'Not configured';
       document.getElementById('amountDisplay').textContent = '$' + amount.toFixed(2);
-      const names = { base:'Base', eth:'Ethereum', sol:'Solana', ton:'TON' };
+      const names = { base:'Base', eth:'Ethereum', sol:'Solana', ton:'TON', base_sepolia:'Base Sepolia' };
       document.getElementById('tokenDisplay').textContent = token.toUpperCase() + ' on ' + (names[selectedChain] || selectedChain);
     }
 
@@ -981,6 +982,7 @@ function paymentPageHtml(): string {
         <div class="chain-badge" data-chain="eth" onclick="selectChain('eth')">Ethereum</div>
         <div class="chain-badge" data-chain="sol" onclick="selectChain('sol')">Solana</div>
         <div class="chain-badge" data-chain="ton" onclick="selectChain('ton')">TON</div>
+        <div class="chain-badge" data-chain="base_sepolia" onclick="selectChain('base_sepolia')">Base Sepolia</div>
       </div>
       <label>Token</label>
       <select id="tokenSelect" onchange="updateDisplay()">
@@ -1088,7 +1090,7 @@ function paymentPageHtml(): string {
       document.getElementById('walletAddress').textContent = appConfig.wallets[selectedChain] || 'Not configured';
       const price = appConfig.prices[planParam] || appConfig.prices.starter;
       document.getElementById('amountDisplay').textContent = '$' + price.toFixed(2);
-      const chainNames = { base: 'Base', eth: 'Ethereum', sol: 'Solana', ton: 'TON' };
+      const chainNames = { base: 'Base', eth: 'Ethereum', sol: 'Solana', ton: 'TON', base_sepolia: 'Base Sepolia' };
       document.getElementById('tokenDisplay').textContent = token.toUpperCase() + ' on ' + (chainNames[selectedChain] || selectedChain);
     }
 

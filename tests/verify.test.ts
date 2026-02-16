@@ -92,6 +92,39 @@ describe("verifyEvmTransfer", () => {
     expect(result!.blockNumber).toBe(99999);
     expect(result!.to.toLowerCase()).toBe(ourWallet.toLowerCase());
   });
+  it("returns verified transfer for matching USDC Transfer on base_sepolia", async () => {
+    const ourWallet = "0xOurWalletAddress000000000000000000000001";
+    const ourWalletPadded =
+      "0x000000000000000000000000" +
+      ourWallet.slice(2).toLowerCase();
+
+    mockGetTransactionReceipt.mockResolvedValue({
+      status: "success",
+      blockNumber: 11111n,
+      logs: [
+        {
+          // USDC on Base Sepolia (Circle testnet)
+          address: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          topics: [
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "0x0000000000000000000000001111111111111111111111111111111111111111",
+            ourWalletPadded,
+          ],
+          data: "0x0000000000000000000000000000000000000000000000000000000000989680", // 10_000_000 = 10 USDC
+        },
+      ],
+    });
+
+    const { verifyEvmTransfer } = await import("../src/verify.js");
+    const config = makeConfig({ base_sepolia: ourWallet });
+    const result = await verifyEvmTransfer("0xsepoliatx", "base_sepolia", config);
+
+    expect(result).not.toBeNull();
+    expect(result!.token).toBe("usdc");
+    expect(result!.amountUsd).toBe(10);
+    expect(result!.blockNumber).toBe(11111);
+    expect(result!.to.toLowerCase()).toBe(ourWallet.toLowerCase());
+  });
 });
 
 describe("verifyTonTransfer", () => {
@@ -328,12 +361,14 @@ function makeConfig(wallets?: Partial<Record<string, string>>) {
       eth: wallets?.eth ?? "0xTestEthWallet",
       ton: wallets?.ton ?? "EQTestTonWallet",
       sol: wallets?.sol ?? "TestSolWallet",
+      base_sepolia: wallets?.base_sepolia ?? wallets?.base ?? "0xTestBaseWallet",
     },
     rpc: {
       base: "https://mainnet.base.org",
       eth: "https://cloudflare-eth.com",
       sol: "https://api.mainnet-beta.solana.com",
       ton: "https://toncenter.com/api/v3",
+      base_sepolia: "https://sepolia.base.org",
     },
     prices: { starter: 10, pro: 25, max: 100 },
     telegramBotToken: "",

@@ -1,5 +1,5 @@
 import { createPublicClient, http, parseAbiItem, type Address, formatUnits } from "viem";
-import { base, mainnet } from "viem/chains";
+import { base, baseSepolia, mainnet } from "viem/chains";
 import type { ChainId, Config } from "./config.ts";
 import { TOKEN_ADDRESSES } from "./config.ts";
 
@@ -27,12 +27,12 @@ export interface VerifiedTransfer {
  */
 export async function verifyEvmTransfer(
   txHash: string,
-  chainId: "base" | "eth",
+  chainId: "base" | "eth" | "base_sepolia",
   config: Config,
 ): Promise<VerifiedTransfer | null> {
-  const chain = chainId === "base" ? base : mainnet;
-  const rpcUrl = chainId === "base" ? config.rpc.base : config.rpc.eth;
-  const recipientWallet = (chainId === "base" ? config.wallets.base : config.wallets.eth).toLowerCase();
+  const chain = chainId === "base_sepolia" ? baseSepolia : chainId === "base" ? base : mainnet;
+  const rpcUrl = chainId === "base_sepolia" ? config.rpc.base_sepolia : chainId === "base" ? config.rpc.base : config.rpc.eth;
+  const recipientWallet = (chainId === "base_sepolia" ? config.wallets.base_sepolia : chainId === "base" ? config.wallets.base : config.wallets.eth).toLowerCase();
 
   if (!recipientWallet) {
     throw new Error(`No wallet configured for chain ${chainId}`);
@@ -423,6 +423,7 @@ export async function verifyTransfer(
   switch (chainId) {
     case "base":
     case "eth":
+    case "base_sepolia":
       return verifyEvmTransfer(txHash, chainId, config);
     case "ton":
       return verifyTonTransfer(txHash, config);

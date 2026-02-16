@@ -246,7 +246,7 @@ describe("Server API", () => {
       expect(body.prices.starter).toBe(10);
       expect(body.prices.pro).toBe(25);
       expect(body.prices.max).toBe(100);
-      expect(body.chains).toEqual(["base", "eth", "ton", "sol"]);
+      expect(body.chains).toEqual(["base", "eth", "ton", "sol", "base_sepolia"]);
     });
   });
 
@@ -437,6 +437,37 @@ describe("Server API", () => {
       const body = await res.json();
       expect(body.error).toContain("RPC timeout");
       expect(body.payment.status).toBe("failed");
+    });
+
+    it("accepts base_sepolia as valid chainId", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 54321,
+        txHash: "0xsepolia_tx",
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xsepolia_tx",
+          chainId: "base_sepolia",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          apiKey: "test-api-key",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.payment.status).toBe("verified");
+      expect(body.payment.chain_id).toBe("base_sepolia");
     });
 
     it("resolves plan from amount when not specified", async () => {
