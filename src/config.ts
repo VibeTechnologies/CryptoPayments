@@ -10,6 +10,7 @@ export interface Config {
     ton: string;
     sol: string;
     base_sepolia: string;
+    eth_sepolia: string;
   };
   rpc: {
     base: string;
@@ -17,6 +18,7 @@ export interface Config {
     sol: string;
     ton: string;
     base_sepolia: string;
+    eth_sepolia: string;
   };
   prices: {
     starter: number;
@@ -52,6 +54,7 @@ export function loadConfig(): Config {
       ton: env("WALLET_TON"),
       sol: env("WALLET_SOL"),
       base_sepolia: env("WALLET_BASE_SEPOLIA", env("WALLET_BASE")),
+      eth_sepolia: env("WALLET_ETH_SEPOLIA", env("WALLET_ETH")),
     },
     rpc: {
       base: env("RPC_BASE", "https://mainnet.base.org"),
@@ -59,6 +62,7 @@ export function loadConfig(): Config {
       sol: env("RPC_SOL", "https://api.mainnet-beta.solana.com"),
       ton: env("RPC_TON", "https://toncenter.com/api/v3"),
       base_sepolia: env("RPC_BASE_SEPOLIA", "https://sepolia.base.org"),
+      eth_sepolia: env("RPC_ETH_SEPOLIA", "https://rpc.sepolia.org"),
     },
     prices: {
       starter: Number(env("PRICE_STARTER")) || 10,
@@ -73,7 +77,7 @@ export function loadConfig(): Config {
 }
 
 /** Supported chain identifiers */
-export type ChainId = "base" | "eth" | "ton" | "sol" | "base_sepolia";
+export type ChainId = "base" | "eth" | "ton" | "sol" | "base_sepolia" | "eth_sepolia";
 
 /** Token contract/mint addresses per chain (all 6 decimals) */
 export const TOKEN_ADDRESSES: Record<ChainId, { usdt: string; usdc: string }> = {
@@ -96,6 +100,10 @@ export const TOKEN_ADDRESSES: Record<ChainId, { usdt: string; usdc: string }> = 
   base_sepolia: {
     usdt: "0x", // No official USDT on Base Sepolia — placeholder
     usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // Circle testnet USDC
+  },
+  eth_sepolia: {
+    usdt: "0x", // No official USDT on Eth Sepolia — placeholder
+    usdc: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", // Circle testnet USDC
   },
 };
 

@@ -259,7 +259,7 @@ describe("Server API", () => {
       expect(body.prices.starter).toBe(10);
       expect(body.prices.pro).toBe(25);
       expect(body.prices.max).toBe(100);
-      expect(body.chains).toEqual(["base", "eth", "ton", "sol", "base_sepolia"]);
+      expect(body.chains).toEqual(["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"]);
     });
 
     it("returns wallet addresses for all chains", async () => {
@@ -278,7 +278,7 @@ describe("Server API", () => {
       const body = await res.json();
       expect(body.tokens).toBeDefined();
       // Verify all 5 chains have usdt + usdc entries
-      for (const chain of ["base", "eth", "ton", "sol", "base_sepolia"]) {
+      for (const chain of ["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"]) {
         expect(body.tokens[chain]).toBeDefined();
         expect(body.tokens[chain].usdt).toBeDefined();
         expect(body.tokens[chain].usdc).toBeDefined();

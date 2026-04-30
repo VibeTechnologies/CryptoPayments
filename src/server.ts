@@ -73,7 +73,7 @@ export function createApp(injectedDb?: DB) {
   // ── Health ──────────────────────────────────────────────────────────────────
 
   app.get("/api/health", (c) =>
-    c.json({ ok: true, chains: ["base", "eth", "ton", "sol", "base_sepolia"], tokens: ["usdt", "usdc"] }),
+    c.json({ ok: true, chains: ["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"], tokens: ["usdt", "usdc"] }),
   );
 
   // ── Public config ──────────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ export function createApp(injectedDb?: DB) {
       wallets: config.wallets,
       prices: config.prices,
       tokens: TOKEN_ADDRESSES,
-      chains: ["base", "eth", "ton", "sol", "base_sepolia"],
+      chains: ["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"],
     });
   });
 
@@ -122,8 +122,8 @@ export function createApp(injectedDb?: DB) {
     if (!body.txHash || typeof body.txHash !== "string") {
       return c.json({ error: "txHash is required" }, 400);
     }
-    if (!body.chainId || !["base", "eth", "ton", "sol", "base_sepolia"].includes(body.chainId)) {
-      return c.json({ error: "chainId must be base, eth, ton, sol, or base_sepolia" }, 400);
+    if (!body.chainId || !["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"].includes(body.chainId)) {
+      return c.json({ error: "chainId must be base, eth, ton, sol, base_sepolia, or eth_sepolia" }, 400);
     }
     if (!body.idType || !["tg", "email"].includes(body.idType)) {
       return c.json({ error: "idType must be 'tg' or 'email'" }, 400);
