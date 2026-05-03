@@ -31,6 +31,8 @@ export interface Config {
   apiKey: string;
   /** HMAC secret for webhook callbacks to OpenClawBot */
   callbackSecret: string;
+  /** Shared secret for signed checkout intents. Defaults to callbackSecret. */
+  checkoutSecret: string;
   /** Base URL for the payment page (for generating links) */
   baseUrl: string;
 }
@@ -72,6 +74,7 @@ export function loadConfig(): Config {
     telegramBotToken: env("TELEGRAM_BOT_TOKEN"),
     apiKey: env("API_KEY"),
     callbackSecret: env("CALLBACK_SECRET"),
+    checkoutSecret: env("CHECKOUT_SECRET", env("CALLBACK_SECRET")),
     baseUrl: env("BASE_URL", "https://pay.openclaw.ai"),
   };
 }

@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { cors } from "hono/cors";
 import { loadConfig, type ChainId, type TokenId, TOKEN_ADDRESSES } from "./config.ts";
 import {
@@ -66,6 +67,47 @@ export function createApp(injectedDb?: DB) {
     return provided === config.apiKey;
   }
 
+  function verifyCheckoutIntent(input: {
+    uid: string;
+    plan?: string;
+    topup?: string;
+    callbackUrl?: string;
+    tenantType?: string;
+    vmProvider?: string;
+    hostType?: string;
+    amountUsd?: string;
+    exp?: string;
+    sig?: string;
+  }): boolean {
+    if (!config.checkoutSecret || !input.exp || !input.sig) return false;
+    const exp = Number(input.exp);
+    if (!Number.isFinite(exp) || exp < Math.floor(Date.now() / 1000)) return false;
+    const params = new URLSearchParams();
+    if (input.plan) params.set("plan", input.plan);
+    if (input.topup) params.set("topup", input.topup);
+    params.set("uid", input.uid);
+    params.set("idtype", "tg");
+    if (input.amountUsd) params.set("amountUsd", input.amountUsd);
+    params.set("exp", input.exp);
+    if (input.callbackUrl) params.set("callback", input.callbackUrl);
+    if (input.tenantType) {
+      params.set("tenantType", input.tenantType);
+      params.set("tenant", input.tenantType);
+    }
+    if (input.vmProvider) params.set("vmp", input.vmProvider);
+    if (input.hostType) params.set("hostType", input.hostType);
+    const canonical = [...params.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, value]) => `${key}=${value}`)
+      .join("\n");
+    const expected = createHmac("sha256", config.checkoutSecret)
+      .update(canonical)
+      .digest("hex");
+    const expectedBuffer = Buffer.from(expected);
+    const actualBuffer = Buffer.from(input.sig);
+    return expectedBuffer.length === actualBuffer.length && timingSafeEqual(expectedBuffer, actualBuffer);
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   // LEGACY API (backward compatible)
   // ══════════════════════════════════════════════════════════════════════════
@@ -97,12 +139,21 @@ export function createApp(injectedDb?: DB) {
       idType: "tg" | "email";
       uid: string;
       plan?: string;
+      topup?: string;
+      tenantType?: "personal" | "team";
+      vmProvider?: "azure" | "hetzner";
+      hostType?: "vps";
+      amountUsd?: string;
       callbackUrl?: string;
       initData?: string;
       apiKey?: string;
+      exp?: string;
+      sig?: string;
     }>();
 
     // ── Auth (optional but recommended) ──
+    let authed = false;
+    let checkoutIntentVerified = false;
     if (body.initData && config.telegramBotToken) {
       const result = await verifyTelegramInitData(body.initData, config.telegramBotToken);
       if (!result.valid) {
@@ -112,10 +163,18 @@ export function createApp(injectedDb?: DB) {
         body.idType = "tg";
         body.uid = String(result.user.id);
       }
+      authed = true;
     } else if (body.apiKey) {
       if (!config.apiKey || body.apiKey !== config.apiKey) {
         return c.json({ error: "Invalid API key" }, 401);
       }
+      authed = true;
+    } else if (verifyCheckoutIntent(body)) {
+      authed = true;
+      checkoutIntentVerified = true;
+    }
+    if (!authed) {
+      return c.json({ error: "Authentication required" }, 401);
     }
 
     // ── Validate inputs ──
@@ -166,6 +225,24 @@ export function createApp(injectedDb?: DB) {
       }
 
       const planId = resolveplan(result.amountUsd, config.prices);
+      const signedAmountUsd = Number(body.amountUsd);
+      const matchesSignedIntentAmount = checkoutIntentVerified &&
+        body.plan &&
+        Number.isFinite(signedAmountUsd) &&
+        Math.abs(result.amountUsd - signedAmountUsd) < 0.01;
+      const verifiedPlanId = body.topup
+        ? undefined
+        : matchesSignedIntentAmount
+          ? body.plan
+          : planId;
+      if (!body.topup && body.plan && verifiedPlanId !== body.plan) {
+        await markPaymentFailed(appDb, payment.id);
+        return c.json({ error: "Verified amount does not match requested plan", payment: await getPaymentById(appDb, payment.id) }, 400);
+      }
+      if (!body.topup && !verifiedPlanId) {
+        await markPaymentFailed(appDb, payment.id);
+        return c.json({ error: "Verified amount does not match a supported plan", payment: await getPaymentById(appDb, payment.id) }, 400);
+      }
 
       await markPaymentVerified(appDb, payment.id, {
         fromAddress: result.from,
@@ -173,14 +250,19 @@ export function createApp(injectedDb?: DB) {
         amountRaw: result.amountRaw,
         amountUsd: result.amountUsd,
         blockNumber: result.blockNumber,
-        planId: planId ?? body.plan ?? undefined,
+        planId: verifiedPlanId ?? undefined,
       });
 
       const verified = await getPaymentById(appDb, payment.id);
 
       // ── Send webhook callback ──
       if (body.callbackUrl && config.callbackSecret && verified) {
-        sendCallback(body.callbackUrl, verified).catch((err) =>
+        sendCallback(body.callbackUrl, verified, {
+          topup: body.topup,
+          tenantType: body.tenantType,
+          vmProvider: body.vmProvider,
+          hostType: body.hostType,
+        }).catch((err) =>
           console.error("Callback error:", err),
         );
       }
@@ -571,7 +653,16 @@ async function hmacSha256Hex(secret: string, message: string): Promise<string> {
   return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function sendCallback(callbackUrl: string, payment: PaymentRecord): Promise<void> {
+async function sendCallback(
+  callbackUrl: string,
+  payment: PaymentRecord,
+  metadata: {
+    topup?: string;
+    tenantType?: string;
+    vmProvider?: string;
+    hostType?: string;
+  } = {},
+): Promise<void> {
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const payload = JSON.stringify({
     event: "payment.verified",
@@ -584,6 +675,10 @@ async function sendCallback(callbackUrl: string, payment: PaymentRecord): Promis
       token: payment.token,
       amountUsd: payment.amount_usd,
       txHash: payment.tx_hash,
+      ...(metadata.topup ? { topup: metadata.topup } : {}),
+      ...(metadata.tenantType ? { tenantType: metadata.tenantType } : {}),
+      ...(metadata.vmProvider ? { vmProvider: metadata.vmProvider } : {}),
+      ...(metadata.hostType ? { hostType: metadata.hostType } : {}),
     },
     timestamp,
   });

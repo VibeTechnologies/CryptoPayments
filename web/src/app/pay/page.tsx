@@ -41,9 +41,16 @@ export default function PayPage() {
 
   // Payment params (from URL query or Telegram start_param)
   const [plan, setPlan] = useState("starter");
+  const [topup, setTopup] = useState("");
   const [uid, setUid] = useState("");
   const [idType, setIdType] = useState<"tg" | "email">("tg");
   const [callbackUrl, setCallbackUrl] = useState("");
+  const [tenantType, setTenantType] = useState<"personal" | "team" | "">("");
+  const [vmProvider, setVmProvider] = useState<"azure" | "hetzner" | "">("");
+  const [hostType, setHostType] = useState<"vps" | "">("");
+  const [amountUsd, setAmountUsd] = useState("");
+  const [intentExp, setIntentExp] = useState("");
+  const [intentSig, setIntentSig] = useState("");
   const [initData, setInitData] = useState("");
   const [userName, setUserName] = useState("");
 
@@ -69,8 +76,15 @@ export default function PayPage() {
 
     let pUid = params.get("uid") || "";
     let pPlan = params.get("plan") || "starter";
+    const pTopup = params.get("topup") || "";
     let pIdType = (params.get("idtype") || "tg") as "tg" | "email";
     let pCallback = params.get("callback") || "";
+    const pTenantType = params.get("tenantType") || params.get("tenant") || "";
+    const pVmProvider = params.get("vmp") || params.get("vmProvider") || "";
+    const pHostType = params.get("hostType") || "";
+    const pAmountUsd = params.get("amountUsd") || "";
+    const pExp = params.get("exp") || "";
+    const pSig = params.get("sig") || "";
     let pName = "";
 
     if (tg) {
@@ -95,9 +109,16 @@ export default function PayPage() {
     }
 
     setPlan(pPlan);
+    setTopup(pTopup);
     setUid(pUid);
     setIdType(pIdType);
     setCallbackUrl(pCallback);
+    setTenantType(pTenantType === "team" || pTenantType === "personal" ? pTenantType : "");
+    setVmProvider(pVmProvider === "azure" || pVmProvider === "hetzner" ? pVmProvider : "");
+    setHostType(pHostType === "vps" ? "vps" : "");
+    setAmountUsd(pAmountUsd);
+    setIntentExp(pExp);
+    setIntentSig(pSig);
     setUserName(pName || (pIdType === "tg" ? `User ${pUid}` : pUid));
 
     // Fetch config
@@ -108,7 +129,9 @@ export default function PayPage() {
   }, []);
 
   // Get price for current plan
-  const price = config?.prices[plan] ?? config?.prices.starter ?? 10;
+  const price = amountUsd
+    ? Number(amountUsd)
+    : config?.prices[plan] ?? config?.prices.starter ?? 10;
 
   // Filter chains — hide testnets unless ?test=true
   const visibleChains = showTestnets ? CHAINS : CHAINS.filter((c) => !c.testnet);
@@ -126,7 +149,7 @@ export default function PayPage() {
       await doSubmit(hash);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedChain, selectedToken, idType, uid, plan, callbackUrl, initData],
+    [selectedChain, selectedToken, idType, uid, plan, topup, callbackUrl, initData, tenantType, vmProvider, hostType, amountUsd, intentExp, intentSig],
   );
 
   // Submit payment for verification
@@ -145,9 +168,16 @@ export default function PayPage() {
         token: selectedToken,
         idType,
         uid,
-        plan,
+        plan: topup ? undefined : plan,
+        topup: topup || undefined,
+        tenantType: tenantType || undefined,
+        vmProvider: vmProvider || undefined,
+        hostType: hostType || undefined,
+        amountUsd: amountUsd || undefined,
         callbackUrl: callbackUrl || undefined,
         initData: initData || undefined,
+        exp: intentExp || undefined,
+        sig: intentSig || undefined,
       });
 
       if (result.payment?.status === "verified") {
@@ -209,7 +239,7 @@ export default function PayPage() {
         <div className="mb-6">
           <h1 className="text-xl font-semibold tracking-tight">Pay with Crypto</h1>
           <p className="mt-1 text-sm text-muted">
-            {userName} — {plan.charAt(0).toUpperCase() + plan.slice(1)} plan
+            {userName} — {topup ? `${topup.charAt(0).toUpperCase() + topup.slice(1)} top-up` : `${plan.charAt(0).toUpperCase() + plan.slice(1)} plan`}
           </p>
         </div>
 

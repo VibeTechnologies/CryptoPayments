@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { createHmac } from "node:crypto";
 import type { DB, PaymentRecord } from "../src/db.js";
 
 // ── Env vars must be set BEFORE importing server.ts ──────────────────────────
@@ -6,6 +7,7 @@ process.env.SUPABASE_URL = "https://test.supabase.co";
 process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
 process.env.API_KEY = "test-api-key";
 process.env.CALLBACK_SECRET = "test-callback-secret";
+process.env.CHECKOUT_SECRET = "test-callback-secret";
 process.env.TELEGRAM_BOT_TOKEN = "123456:TestBotToken";
 process.env.WALLET_BASE = "0xTestBaseWallet";
 process.env.WALLET_ETH = "0xTestEthWallet";
@@ -212,6 +214,24 @@ function createMockSupabase(): DB {
 const { createApp } = await import("../src/server.js");
 const { verifyTransfer } = await import("../src/verify.js");
 const mockedVerifyTransfer = vi.mocked(verifyTransfer);
+
+function signCheckoutIntent(params: Record<string, string>): string {
+  const searchParams = new URLSearchParams(params);
+  const canonical = [...searchParams.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+  return createHmac("sha256", "test-callback-secret")
+    .update(canonical)
+    .digest("hex");
+}
+
+function buildSignedCheckoutBody(params: Record<string, string>): Record<string, string> {
+  return {
+    ...params,
+    sig: signCheckoutIntent(params),
+  };
+}
 
 describe("Server API", () => {
   let app: ReturnType<typeof createApp>;
@@ -633,17 +653,7 @@ describe("Server API", () => {
       expect(body.payment.token).toBe("usdt");
     });
 
-    it("proceeds without auth when no apiKey or initData provided", async () => {
-      mockedVerifyTransfer.mockResolvedValueOnce({
-        from: "0xSender",
-        to: "0xTestBaseWallet",
-        amountRaw: "10000000",
-        amountUsd: 10,
-        token: "usdc",
-        blockNumber: 12345,
-        txHash: "0xnoauth_tx",
-      });
-
+    it("rejects payment submission without auth or signed checkout intent", async () => {
       const res = await app.request("/api/payment", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -658,10 +668,140 @@ describe("Server API", () => {
         }),
       });
 
-      // Should NOT return 401 — auth is optional
+      expect(res.status).toBe(401);
+      const body = await res.json();
+      expect(body.error).toBe("Authentication required");
+      expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+    });
+
+    it("accepts a valid signed checkout intent without exposing an API key", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 12345,
+        txHash: "0xsigned_intent_tx",
+      });
+
+      const checkout = buildSignedCheckoutBody({
+        plan: "starter",
+        uid: "42",
+        idtype: "tg",
+        amountUsd: "10.00",
+        exp: String(Math.floor(Date.now() / 1000) + 600),
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xsigned_intent_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          amountUsd: checkout.amountUsd,
+          exp: checkout.exp,
+          sig: checkout.sig,
+        }),
+      });
+
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.payment.status).toBe("verified");
+      expect(body.payment.plan_id).toBe("starter");
+    });
+
+    it("rejects signed checkout amount mismatches", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 12345,
+        txHash: "0xsigned_mismatch_tx",
+      });
+
+      const checkout = buildSignedCheckoutBody({
+        plan: "max",
+        uid: "42",
+        idtype: "tg",
+        amountUsd: "100.00",
+        exp: String(Math.floor(Date.now() / 1000) + 600),
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xsigned_mismatch_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "max",
+          amountUsd: checkout.amountUsd,
+          exp: checkout.exp,
+          sig: checkout.sig,
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe("Verified amount does not match requested plan");
+      expect(body.payment.status).toBe("failed");
+    });
+
+    it("accepts signed VPS/team amounts outside the base plan price table", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "105000000",
+        amountUsd: 105,
+        token: "usdc",
+        blockNumber: 12345,
+        txHash: "0xvps_team_tx",
+      });
+
+      const checkout = buildSignedCheckoutBody({
+        plan: "max",
+        uid: "42",
+        idtype: "tg",
+        amountUsd: "105.00",
+        exp: String(Math.floor(Date.now() / 1000) + 600),
+        tenantType: "team",
+        tenant: "team",
+        vmp: "hetzner",
+        hostType: "vps",
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xvps_team_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "max",
+          amountUsd: checkout.amountUsd,
+          tenantType: "team",
+          vmProvider: "hetzner",
+          hostType: "vps",
+          exp: checkout.exp,
+          sig: checkout.sig,
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.payment.status).toBe("verified");
+      expect(body.payment.plan_id).toBe("max");
     });
   });
 
@@ -879,6 +1019,10 @@ describe("Server API", () => {
           plan: "starter",
           apiKey: "test-api-key",
           callbackUrl: "https://bot.example.com/webhook",
+          topup: "medium",
+          tenantType: "team",
+          vmProvider: "hetzner",
+          hostType: "vps",
         }),
       });
 
@@ -911,6 +1055,10 @@ describe("Server API", () => {
       expect(body.payment.token).toBe("usdc");
       expect(body.payment.amountUsd).toBe(10);
       expect(body.payment.plan).toBe("starter");
+      expect(body.payment.topup).toBe("medium");
+      expect(body.payment.tenantType).toBe("team");
+      expect(body.payment.vmProvider).toBe("hetzner");
+      expect(body.payment.hostType).toBe("vps");
       expect(body.payment.uid).toBe("42");
       expect(body.payment.idType).toBe("tg");
       expect(body.timestamp).toBeDefined();
