@@ -8,6 +8,7 @@ const CHAIN_NAMES: Record<ChainId, string> = {
   sol: "Solana",
   ton: "TON",
   base_sepolia: "Base Sepolia",
+  eth_sepolia: "Ethereum Sepolia",
 };
 
 interface AmountDisplayProps {
