@@ -1,5 +1,6 @@
 import { Hono, type Context } from "hono";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { Buffer } from "node:buffer";
 import { cors } from "hono/cors";
 import { loadConfig, type ChainId, type TokenId, TOKEN_ADDRESSES } from "./config.ts";
 import {
@@ -169,10 +170,17 @@ export function createApp(injectedDb?: DB) {
         return c.json({ error: "Invalid API key" }, 401);
       }
       authed = true;
-    } else if (verifyCheckoutIntent(body)) {
-      authed = true;
-      checkoutIntentVerified = true;
+    } else {
+      try {
+        if (verifyCheckoutIntent(body)) {
+          authed = true;
+          checkoutIntentVerified = true;
+        }
+      } catch (e) {
+        console.error("verifyCheckoutIntent crashed:", e);
+      }
     }
+
     if (!authed) {
       return c.json({ error: "Authentication required" }, 401);
     }
