@@ -70,7 +70,7 @@ gh workflow run pay-deploy.yml --repo VibeTechnologies/CryptoPayments
 ### Production URL
 
 ```
-https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments
+https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments
 ```
 
 ### Endpoints
@@ -85,7 +85,7 @@ https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments
 ### Deploy Edge Function
 
 ```bash
-supabase functions deploy crypto-payments --project-ref wxxnkncwneyhmudfyayd
+supabase functions deploy crypto-payments --project-ref krjbwbvmrpazdmmjstzo
 ```
 
 ### Environment Variables (Edge Function)

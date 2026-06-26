@@ -54,10 +54,10 @@ Telegram User
 | **Runtime** | Deno (Supabase Edge Functions) / Node.js 22 (local dev) |
 | **Framework** | Hono (runtime-agnostic) |
 | **Database** | Supabase Postgres via `@supabase/supabase-js` |
-| **Supabase Project** | `wxxnkncwneyhmudfyayd` |
-| **API URL** | `https://wxxnkncwneyhmudfyayd.supabase.co` |
-| **Edge Function URL** | `https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments/` |
-| **Dashboard** | https://supabase.com/dashboard/project/wxxnkncwneyhmudfyayd |
+| **Supabase Project** | `krjbwbvmrpazdmmjstzo` |
+| **API URL** | `https://krjbwbvmrpazdmmjstzo.supabase.co` |
+| **Edge Function URL** | `https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments/` |
+| **Dashboard** | https://supabase.com/dashboard/project/krjbwbvmrpazdmmjstzo |
 | **Region** | East US (North Virginia) |
 
 ### Chains & Tokens
@@ -93,7 +93,7 @@ Telegram User
 
 ```bash
 # Supabase (auto-injected in Edge Functions — only needed locally)
-SUPABASE_URL=https://wxxnkncwneyhmudfyayd.supabase.co
+SUPABASE_URL=https://krjbwbvmrpazdmmjstzo.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...
 
 # Server (local dev only)
@@ -146,7 +146,7 @@ supabase secrets set \
 
 ```bash
 CRYPTO_PAYMENTS_ENABLED=true
-CRYPTO_PAYMENTS_URL=https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments
+CRYPTO_PAYMENTS_URL=https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments
 CRYPTO_PAYMENTS_API_KEY=cpk_...         # Same as CryptoPayments API_KEY
 CRYPTO_CALLBACK_SECRET=                  # Same as CryptoPayments CALLBACK_SECRET
 CRYPTO_WEBHOOK_PORT=3003                 # HTTP server port for webhook receiver
@@ -189,7 +189,7 @@ pnpm deploy:edge
 #   supabase functions deploy crypto-payments --no-verify-jwt
 
 # 2. Verify
-curl -s https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments/api/health
+curl -s https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments/api/health
 # Expected: {"ok":true,"chains":["base","eth","ton","sol"],"tokens":["usdt","usdc"]}
 
 # 3. Set secrets (if not already done)
@@ -416,7 +416,7 @@ Add to `openclaw-bot-secret`:
 - name: CRYPTO_PAYMENTS_ENABLED
   value: "true"
 - name: CRYPTO_PAYMENTS_URL
-  value: "https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments"
+  value: "https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments"
 - name: CRYPTO_PAYMENTS_API_KEY
   valueFrom:
     secretKeyRef:
@@ -443,10 +443,10 @@ Add to `openclaw-bot-secret`:
 
 ```bash
 # Edge Function
-curl -s https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments/api/health
+curl -s https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments/api/health
 
 # Config endpoint
-curl -s https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments/api/config
+curl -s https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments/api/config
 ```
 
 ### Database Inspection (Supabase)
@@ -455,12 +455,12 @@ Use the Supabase dashboard SQL editor or the API:
 
 ```bash
 # List recent payments (via Supabase REST API)
-curl -s "https://wxxnkncwneyhmudfyayd.supabase.co/rest/v1/payments?order=created_at.desc&limit=10" \
+curl -s "https://krjbwbvmrpazdmmjstzo.supabase.co/rest/v1/payments?order=created_at.desc&limit=10" \
   -H "apikey: <service_role_key>" \
   -H "Authorization: Bearer <service_role_key>"
 
 # List recent invoices
-curl -s "https://wxxnkncwneyhmudfyayd.supabase.co/rest/v1/invoices?order=created_at.desc&limit=10" \
+curl -s "https://krjbwbvmrpazdmmjstzo.supabase.co/rest/v1/invoices?order=created_at.desc&limit=10" \
   -H "apikey: <service_role_key>" \
   -H "Authorization: Bearer <service_role_key>"
 ```
@@ -468,7 +468,7 @@ curl -s "https://wxxnkncwneyhmudfyayd.supabase.co/rest/v1/invoices?order=created
 Or use the Stripe-like API:
 
 ```bash
-curl -s "https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments/v1/invoices?limit=10" \
+curl -s "https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments/v1/invoices?limit=10" \
   -H "x-api-key: cpk_..."
 ```
 
