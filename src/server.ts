@@ -40,6 +40,8 @@ import { verifyTelegramInitData } from "./telegram.ts";
 const config = loadConfig();
 const db = createDB(config.supabaseUrl, config.supabaseKey);
 
+const TOPUP_PRICES: Record<string, number> = { small: 5, medium: 10, large: 25 };
+
 // ── App factory (for testing) ────────────────────────────────────────────────
 
 export function createApp(injectedDb?: DB) {
@@ -73,7 +75,7 @@ export function createApp(injectedDb?: DB) {
   // ── Health ──────────────────────────────────────────────────────────────────
 
   app.get("/api/health", (c) =>
-    c.json({ ok: true, chains: ["base", "eth", "ton", "sol", "base_sepolia"], tokens: ["usdt", "usdc"] }),
+    c.json({ ok: true, chains: ["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"], tokens: ["usdt", "usdc", "ausd"] }),
   );
 
   // ── Public config ──────────────────────────────────────────────────────────
@@ -83,7 +85,7 @@ export function createApp(injectedDb?: DB) {
       wallets: config.wallets,
       prices: config.prices,
       tokens: TOKEN_ADDRESSES,
-      chains: ["base", "eth", "ton", "sol", "base_sepolia"],
+      chains: ["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"],
     });
   });
 
@@ -123,8 +125,8 @@ export function createApp(injectedDb?: DB) {
     if (!body.txHash || typeof body.txHash !== "string") {
       return c.json({ error: "txHash is required" }, 400);
     }
-    if (!body.chainId || !["base", "eth", "ton", "sol", "base_sepolia"].includes(body.chainId)) {
-      return c.json({ error: "chainId must be base, eth, ton, sol, or base_sepolia" }, 400);
+    if (!body.chainId || !["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"].includes(body.chainId)) {
+      return c.json({ error: "chainId must be base, eth, ton, sol, base_sepolia, or eth_sepolia" }, 400);
     }
     if (!body.idType || !["tg", "email"].includes(body.idType)) {
       return c.json({ error: "idType must be 'tg' or 'email'" }, 400);
@@ -134,8 +136,12 @@ export function createApp(injectedDb?: DB) {
     }
 
     const token = body.token || "usdt";
-    if (!["usdt", "usdc"].includes(token)) {
-      return c.json({ error: "token must be usdt or usdc" }, 400);
+    if (!["usdt", "usdc", "ausd"].includes(token)) {
+      return c.json({ error: "token must be usdt, usdc, or ausd" }, 400);
+    }
+
+    if (body.topup !== undefined && !(body.topup in TOPUP_PRICES)) {
+      return c.json({ error: "topup must be small, medium, or large" }, 400);
     }
 
     // ── Duplicate check ──
@@ -145,17 +151,23 @@ export function createApp(injectedDb?: DB) {
     }
 
     // ── Insert pending payment ──
-    const payment = await insertPayment(appDb, {
-      idType: body.idType,
-      uid: body.uid,
-      txHash: body.txHash,
-      chainId: body.chainId,
-      token,
-      amountRaw: "0",
-      amountUsd: 0,
-      planId: body.plan ?? undefined,
-      topupId: body.topup ?? undefined,
-    });
+    let payment: PaymentRecord;
+    try {
+      payment = await insertPayment(appDb, {
+        idType: body.idType,
+        uid: body.uid,
+        txHash: body.txHash,
+        chainId: body.chainId,
+        token,
+        amountRaw: "0",
+        amountUsd: 0,
+        planId: body.topup ? undefined : (body.plan ?? undefined),
+        topupId: body.topup ?? undefined,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: `Failed to record payment: ${msg}` }, 500);
+    }
 
     // ── Verify on-chain ──
     try {
@@ -167,7 +179,13 @@ export function createApp(injectedDb?: DB) {
         return c.json({ payment: updated, error: "Transfer not found or not to our wallet" }, 400);
       }
 
-      const planId = resolveplan(result.amountUsd, config.prices);
+      if (body.topup && result.amountUsd < TOPUP_PRICES[body.topup]) {
+        await markPaymentFailed(appDb, payment.id);
+        const updated = await getPaymentById(appDb, payment.id);
+        return c.json({ payment: updated, error: `Underpaid: expected $${TOPUP_PRICES[body.topup]}, got $${result.amountUsd}` }, 400);
+      }
+
+      const planId = body.topup ? null : (resolveplan(result.amountUsd, config.prices) ?? body.plan ?? undefined);
 
       await markPaymentVerified(appDb, payment.id, {
         fromAddress: result.from,
@@ -175,7 +193,7 @@ export function createApp(injectedDb?: DB) {
         amountRaw: result.amountRaw,
         amountUsd: result.amountUsd,
         blockNumber: result.blockNumber,
-        planId: planId ?? body.plan ?? undefined,
+        planId: planId ?? undefined,
       });
 
       const verified = await getPaymentById(appDb, payment.id);
@@ -395,6 +413,7 @@ export function createApp(injectedDb?: DB) {
       chain_id?: string;
       token?: string;
       plan_id?: string;
+      topup_id?: string;
       description?: string;
       metadata?: Record<string, unknown>;
     }>();
@@ -410,6 +429,7 @@ export function createApp(injectedDb?: DB) {
       chainId: body.chain_id,
       token: body.token,
       planId: body.plan_id,
+      topupId: body.topup_id,
       description: body.description,
       metadata: body.metadata,
     });

@@ -43,15 +43,8 @@ async function main(): Promise<void> {
 	await writeFile(jsonPath, `${JSON.stringify(walletRecord, null, 2)}\n`, "utf8");
 	await QRCode.toFile(pngPath, addressUri, { width: 400, margin: 1 });
 
-	console.log("Private Key:", wallet.privateKey);
 	console.log("Public Key:", publicKey);
 	console.log("Address:", wallet.address);
-
-	if (mnemonicPhrase) {
-		console.log("Mnemonic (Seed Phrase):", mnemonicPhrase);
-	} else {
-		console.log("Mnemonic (Seed Phrase): not available");
-	}
 
 	console.log("\nQR Payload:", addressUri);
 	console.log("\nAddress QR (terminal):");

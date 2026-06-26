@@ -2,7 +2,7 @@
 # E2E test: agentUSD Anvil testnet deploy + mint + crypto topup callback
 #
 # Flow:
-#   1. Start Anvil (chain-id 84532 = base_sepolia, port 8546)
+#   1. Start Anvil (chain-id 11155111 = eth_sepolia, port 8546)
 #   2. Deploy agentUSD ERC20 on Anvil via forge script
 #   3. Transfer 5 aUSD from deployer → recipient wallet (captures txHash)
 #   4. Start Python callback receiver on port 9998
@@ -39,10 +39,10 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ── Step 1: Start Anvil ───────────────────────────────────────────────────────
-echo "==> Starting Anvil on port $ANVIL_PORT (chain-id 84532 = base_sepolia)..."
+echo "==> Starting Anvil on port $ANVIL_PORT (chain-id 11155111 = eth_sepolia)..."
 "$ANVIL" \
   --port "$ANVIL_PORT" \
-  --chain-id 84532 \
+  --chain-id 11155111 \
   --silent \
   2>/dev/null &
 ANVIL_PID=$!
@@ -204,7 +204,7 @@ PAYMENT_RESP=$(curl -s -X POST "http://localhost:$SERVER_PORT/api/payment" \
   -H "Content-Type: application/json" \
   -d "{
     \"txHash\":      \"$TX_HASH\",
-    \"chainId\":     \"base_sepolia\",
+    \"chainId\":     \"eth_sepolia\",
     \"idType\":      \"tg\",
     \"uid\":         \"123456789\",
     \"topup\":       \"small\",

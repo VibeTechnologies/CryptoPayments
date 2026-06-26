@@ -30,6 +30,9 @@ describe("AmountDisplay", () => {
 
     rerender(<AmountDisplay amount={10} token="usdc" chain="base_sepolia" />);
     expect(screen.getByText("USDC on Base Sepolia")).toBeInTheDocument();
+
+    rerender(<AmountDisplay amount={10} token="usdc" chain="eth_sepolia" />);
+    expect(screen.getByText("USDC on Ethereum Sepolia")).toBeInTheDocument();
   });
 
   it("uppercases token id", () => {

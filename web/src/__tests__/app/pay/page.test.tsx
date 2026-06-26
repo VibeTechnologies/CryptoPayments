@@ -42,6 +42,7 @@ const mockConfig = {
     sol: "SolWallet123",
     ton: "TONWallet456",
     base_sepolia: "0xSepoliaWallet",
+    eth_sepolia: "0xEthSepoliaWallet",
   },
   prices: { starter: 10, pro: 25, max: 100 },
   tokens: {
@@ -50,8 +51,9 @@ const mockConfig = {
     sol: { usdc: "SolUSDC", usdt: "SolUSDT" },
     ton: { usdc: "TonUSDC", usdt: "TonUSDT" },
     base_sepolia: { usdc: "0xSepoliaUSDC", usdt: "0x" },
+    eth_sepolia: { usdc: "0x", usdt: "0x", ausd: "0xEthSepoliaAUSD" },
   },
-  chains: ["base", "eth", "sol", "ton", "base_sepolia"],
+  chains: ["base", "eth", "sol", "ton", "base_sepolia", "eth_sepolia"],
 };
 
 function setUrlParams(params: Record<string, string>) {
@@ -145,14 +147,16 @@ describe("PayPage", () => {
       expect(screen.getByText("Base")).toBeInTheDocument();
     });
     expect(screen.getByText("Base Sepolia")).toBeInTheDocument();
+    expect(screen.getByText("Ethereum Sepolia")).toBeInTheDocument();
   });
 
-  it("renders token selector with USDC and USDT", async () => {
+  it("renders token selector with USDC, USDT and aUSD", async () => {
     render(<PayPage />);
     await waitFor(() => {
       expect(screen.getByText("USDC")).toBeInTheDocument();
     });
     expect(screen.getByText("USDT")).toBeInTheDocument();
+    expect(screen.getByText("aUSD")).toBeInTheDocument();
   });
 
   it("updates amount display when changing chain", async () => {

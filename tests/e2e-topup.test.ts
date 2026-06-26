@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { DB } from "../src/db.js";
 
 // ── Env vars must be set BEFORE importing server.ts ──────────────────────────
@@ -217,14 +217,19 @@ describe("Crypto topup E2E — callback flow", () => {
   let app: ReturnType<typeof createApp>;
   let mockDb: DB;
 
+  const originalFetch = globalThis.fetch;
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockDb = createMockSupabase();
     app = createApp(mockDb);
   });
 
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
   it("topup=small payment triggers callback with topup field and no plan", async () => {
-    const originalFetch = globalThis.fetch;
     const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
     globalThis.fetch = vi.fn(async (url: any, init?: any) => {
       fetchCalls.push({ url: String(url), init });
@@ -259,6 +264,7 @@ describe("Crypto topup E2E — callback flow", () => {
     expect(res.status).toBe(200);
     const resBody = await res.json();
     expect(resBody.payment.topup_id).toBe("small");
+    expect(resBody.payment.plan_id).toBeNull();
 
     // The callback is fired async (sendCallback().catch()), give it a tick
     await new Promise((r) => setTimeout(r, 100));
@@ -273,12 +279,9 @@ describe("Crypto topup E2E — callback flow", () => {
     expect(body.payment.topup).toBe("small");
     // plan should be absent — no plan was submitted
     expect(body.payment.plan).toBeUndefined();
-
-    globalThis.fetch = originalFetch;
   });
 
   it("plan=pro payment callback has plan field and no topup field", async () => {
-    const originalFetch = globalThis.fetch;
     const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
     globalThis.fetch = vi.fn(async (url: any, init?: any) => {
       fetchCalls.push({ url: String(url), init });
@@ -325,8 +328,6 @@ describe("Crypto topup E2E — callback flow", () => {
     const body = JSON.parse(callbackCall!.init.body as string);
     expect(body.payment.plan).toBe("pro");
     expect(body.payment.topup).toBeUndefined();
-
-    globalThis.fetch = originalFetch;
   });
 
   it("topup=medium stores topup_id=medium in payment record", async () => {
@@ -358,6 +359,60 @@ describe("Crypto topup E2E — callback flow", () => {
     const body = await res.json();
     expect(body.payment.status).toBe("verified");
     expect(body.payment.topup_id).toBe("medium");
-    // plan_id may be resolved from amount by resolveplan; topup_id is the discriminator
+    expect(body.payment.plan_id).toBeNull();
+  });
+
+  it("topup=large stores topup_id=large and writes no plan_id", async () => {
+    // $25 collides with the default pro plan price — highest-severity collision case.
+    // A top-up MUST never receive a plan_id even when the amount matches a plan.
+    const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+    globalThis.fetch = vi.fn(async (url: any, init?: any) => {
+      fetchCalls.push({ url: String(url), init });
+      return new Response("OK", { status: 200 });
+    }) as any;
+
+    mockedVerifyTransfer.mockResolvedValueOnce({
+      from: "0xSender",
+      to: "0xTestBaseWallet",
+      amountRaw: "25000000",
+      amountUsd: 25,
+      token: "usdc",
+      blockNumber: 20004,
+      txHash: "0xe2e_topup_large_tx",
+    });
+
+    const res = await app.request("/api/payment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        txHash: "0xe2e_topup_large_tx",
+        chainId: "base",
+        token: "usdc",
+        idType: "tg",
+        uid: "42",
+        topup: "large",
+        apiKey: "test-api-key",
+        callbackUrl: "https://bot.example.com/webhook",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const resBody = await res.json();
+    expect(resBody.payment.topup_id).toBe("large");
+    expect(resBody.payment.plan_id).toBeNull();
+
+    // The callback is fired async (sendCallback().catch()), give it a tick
+    await new Promise((r) => setTimeout(r, 100));
+
+    const callbackCall = fetchCalls.find(
+      (c) => c.url === "https://bot.example.com/webhook",
+    );
+    expect(callbackCall).toBeDefined();
+    expect(callbackCall!.init.method).toBe("POST");
+
+    const body = JSON.parse(callbackCall!.init.body as string);
+    expect(body.payment.topup).toBe("large");
+    // plan must be absent — resolveplan is gated off for top-ups
+    expect(body.payment.plan).toBeUndefined();
   });
 });

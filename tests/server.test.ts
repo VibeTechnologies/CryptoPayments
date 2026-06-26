@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { DB, PaymentRecord } from "../src/db.js";
 
 // ── Env vars must be set BEFORE importing server.ts ──────────────────────────
@@ -910,9 +910,14 @@ describe("Server API", () => {
   // ── Callback webhook ──
 
   describe("Callback webhook", () => {
+    const originalFetch = globalThis.fetch;
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
     it("sends POST with HMAC signature when callbackUrl is provided", async () => {
       // Capture the global fetch calls
-      const originalFetch = globalThis.fetch;
       const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
       globalThis.fetch = vi.fn(async (url: any, init?: any) => {
         fetchCalls.push({ url: String(url), init });
@@ -976,13 +981,9 @@ describe("Server API", () => {
       expect(body.payment.uid).toBe("42");
       expect(body.payment.idType).toBe("tg");
       expect(body.timestamp).toBeDefined();
-
-      // Restore original fetch
-      globalThis.fetch = originalFetch;
     });
 
     it("includes topup field in callback payload when topup is set", async () => {
-      const originalFetch = globalThis.fetch;
       const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
       globalThis.fetch = vi.fn(async (url: any, init?: any) => {
         fetchCalls.push({ url: String(url), init });
@@ -1027,12 +1028,9 @@ describe("Server API", () => {
       expect(body.payment.topup).toBe("small");
       // plan should be absent (not set)
       expect(body.payment.plan).toBeUndefined();
-
-      globalThis.fetch = originalFetch;
     });
 
     it("omits topup field in callback payload when topup is not set", async () => {
-      const originalFetch = globalThis.fetch;
       const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
       globalThis.fetch = vi.fn(async (url: any, init?: any) => {
         fetchCalls.push({ url: String(url), init });
@@ -1074,12 +1072,9 @@ describe("Server API", () => {
       const body = JSON.parse(callbackCall!.init.body as string);
       expect(body.payment.topup).toBeUndefined();
       expect(body.payment.plan).toBe("starter");
-
-      globalThis.fetch = originalFetch;
     });
 
     it("does NOT send callback when callbackUrl is not provided", async () => {
-      const originalFetch = globalThis.fetch;
       const fetchCalls: Array<{ url: string }> = [];
       globalThis.fetch = vi.fn(async (url: any, init?: any) => {
         fetchCalls.push({ url: String(url) });
@@ -1117,8 +1112,6 @@ describe("Server API", () => {
         (c) => !c.url.includes("supabase"),
       );
       expect(webhookCalls.length).toBe(0);
-
-      globalThis.fetch = originalFetch;
     });
   });
 

@@ -92,6 +92,8 @@ export default function PayPage() {
         pName = user.first_name || "";
       }
       // Parse start_param: "plan_uid"
+      // Note: top-ups are passed via the ?topup= query param, not start_param.
+      // start_param carries only plan+uid for subscription flows.
       const startParam = tg.initDataUnsafe?.start_param;
       if (startParam && !params.get("uid")) {
         const parts = startParam.split("_");
@@ -116,9 +118,12 @@ export default function PayPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  // Get price for current plan
-  const price = topup
-    ? (TOPUP_PACKS[topup]?.price ?? 5)
+  // Reject unknown topup keys — silently falling back to $5 would charge the wrong amount.
+  const isUnknownTopup = topup !== "" && !(topup in TOPUP_PACKS);
+
+  // Get price for current plan/pack
+  const price = topup && !isUnknownTopup
+    ? TOPUP_PACKS[topup].price
     : (config?.prices[plan] ?? config?.prices.starter ?? 10);
 
   // Filter chains — hide testnets unless ?test=true
@@ -163,12 +168,16 @@ export default function PayPage() {
 
       if (result.payment?.status === "verified") {
         const p = result.payment;
-        const planName = p.plan_id
-          ? p.plan_id.charAt(0).toUpperCase() + p.plan_id.slice(1)
+        const topupKey = p.topup_id || topup;
+        const topupPack = topupKey ? TOPUP_PACKS[topupKey] : null;
+        const label = topupPack
+          ? `${topupPack.label} ($${topupPack.price}) — `
+          : p.plan_id
+          ? `${p.plan_id.charAt(0).toUpperCase() + p.plan_id.slice(1)} plan — `
           : "";
         setStatus({
           type: "success",
-          message: `Payment verified! ${planName ? `${planName} plan — ` : ""}$${p.amount_usd.toFixed(2)} ${p.token.toUpperCase()}`,
+          message: `Payment verified! ${label}$${p.amount_usd.toFixed(2)} ${p.token.toUpperCase()}`,
         });
         setVerified(true);
 
@@ -222,7 +231,7 @@ export default function PayPage() {
           <p className="mt-1 text-sm text-muted">
             {userName} —{" "}
             {topup
-              ? `Credit Top-Up: ${TOPUP_PACKS[topup]?.label ?? topup}`
+              ? `Credit Top-Up: ${TOPUP_PACKS[topup]?.label ?? "(unknown pack)"}`
               : `${plan.charAt(0).toUpperCase() + plan.slice(1)} plan`}
           </p>
         </div>
@@ -271,16 +280,19 @@ export default function PayPage() {
               walletAddress={walletAddress}
               amount={price}
               onTxSent={handleTxSent}
-              disabled={verified || submitting}
+              disabled={verified || submitting || isUnknownTopup}
               onStatus={(type, msg) => setStatus({ type, message: msg })}
             />
           </div>
         </section>
 
         {/* Status */}
-        {status && (
+        {(isUnknownTopup || status) && (
           <div className="mt-4">
-            <StatusMessage type={status.type} message={status.message} />
+            <StatusMessage
+              type={isUnknownTopup ? "error" : status!.type}
+              message={isUnknownTopup ? `Unknown top-up pack: ${topup}` : status!.message}
+            />
           </div>
         )}
 

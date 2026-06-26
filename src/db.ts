@@ -686,7 +686,7 @@ export async function insertPayment(db: DB, p: InsertPayment): Promise<PaymentRe
 
   // Set tx_hash and metadata directly
   if (p.txHash) {
-    await db
+    const { error: txUpdateError } = await db
       .from("payment_intents")
       .update({
         tx_hash: p.txHash,
@@ -696,6 +696,7 @@ export async function insertPayment(db: DB, p: InsertPayment): Promise<PaymentRe
         amount_raw: p.amountRaw,
       })
       .eq("id", pi.id);
+    if (txUpdateError) throw new Error("Failed to set payment tx details: " + txUpdateError.message);
   }
 
   return piToPaymentRecord(

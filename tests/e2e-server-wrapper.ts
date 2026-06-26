@@ -4,14 +4,14 @@
  *
  * Starts the real CryptoPayments Hono app with:
  *   - In-memory mock DB (no Supabase needed)
- *   - TOKEN_ADDRESSES.base_sepolia.{usdc,usdt} patched to AGENT_USD_CONTRACT
- *   - RPC_BASE_SEPOLIA pointing at local Anvil
- *   - WALLET_BASE_SEPOLIA as the ERC20 transfer recipient
+ *   - TOKEN_ADDRESSES.eth_sepolia.{usdc,usdt,ausd} patched to AGENT_USD_CONTRACT
+ *   - RPC_ETH_SEPOLIA pointing at local Anvil
+ *   - WALLET_ETH_SEPOLIA as the ERC20 transfer recipient
  *
  * Required env vars:
  *   AGENT_USD_CONTRACT   deployed agentUSD address on Anvil
- *   RPC_BASE_SEPOLIA     Anvil RPC URL (default: http://localhost:8546)
- *   WALLET_BASE_SEPOLIA  recipient wallet address
+ *   RPC_ETH_SEPOLIA      Anvil RPC URL (default: http://localhost:8546)
+ *   WALLET_ETH_SEPOLIA   recipient wallet address
  *   CALLBACK_SECRET      HMAC secret for callbacks
  *   PORT                 listen port (default: 9999)
  */
@@ -23,9 +23,9 @@ process.env.PORT = "0"; // prevent server.ts auto-start from using our port
 process.env.SUPABASE_URL = "https://test.supabase.co";
 process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
 process.env.CALLBACK_SECRET = process.env.CALLBACK_SECRET ?? "testsecret";
-process.env.RPC_BASE_SEPOLIA = process.env.RPC_BASE_SEPOLIA ?? "http://localhost:8546";
-process.env.WALLET_BASE_SEPOLIA =
-  process.env.WALLET_BASE_SEPOLIA ?? "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+process.env.RPC_ETH_SEPOLIA = process.env.RPC_ETH_SEPOLIA ?? "http://localhost:8546";
+process.env.WALLET_ETH_SEPOLIA =
+  process.env.WALLET_ETH_SEPOLIA ?? "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 // Placeholder wallets for other chains (not used in this test)
 process.env.WALLET_BASE = process.env.WALLET_BASE ?? "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 process.env.WALLET_ETH = process.env.WALLET_ETH ?? "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
@@ -44,10 +44,13 @@ if (!agentUsdContract) {
 // All modules share the same ES module cache. Patching the object here means
 // verify.ts will see our agentUSD address instead of the real Circle USDC.
 const { TOKEN_ADDRESSES } = await import("../src/config.js");
-TOKEN_ADDRESSES.base_sepolia.usdc = agentUsdContract;
-TOKEN_ADDRESSES.base_sepolia.usdt = agentUsdContract;
+(TOKEN_ADDRESSES as any).eth_sepolia = {
+  usdc: agentUsdContract,
+  usdt: agentUsdContract,
+  ausd: agentUsdContract,
+};
 console.log(
-  `[wrapper] TOKEN_ADDRESSES.base_sepolia patched → usdc/usdt = ${agentUsdContract}`,
+  `[wrapper] TOKEN_ADDRESSES.eth_sepolia patched → usdc/usdt/ausd = ${agentUsdContract}`,
 );
 
 // ── In-memory mock DB ─────────────────────────────────────────────────────────
