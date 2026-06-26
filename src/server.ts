@@ -97,6 +97,7 @@ export function createApp(injectedDb?: DB) {
       idType: "tg" | "email";
       uid: string;
       plan?: string;
+      topup?: string;
       callbackUrl?: string;
       initData?: string;
       apiKey?: string;
@@ -153,6 +154,7 @@ export function createApp(injectedDb?: DB) {
       amountRaw: "0",
       amountUsd: 0,
       planId: body.plan ?? undefined,
+      topupId: body.topup ?? undefined,
     });
 
     // ── Verify on-chain ──
@@ -579,7 +581,8 @@ async function sendCallback(callbackUrl: string, payment: PaymentRecord): Promis
       id: payment.id,
       idType: payment.id_type,
       uid: payment.uid,
-      plan: payment.plan_id,
+      plan: payment.plan_id ?? undefined,
+      topup: payment.topup_id ?? undefined,
       chain: payment.chain_id,
       token: payment.token,
       amountUsd: payment.amount_usd,

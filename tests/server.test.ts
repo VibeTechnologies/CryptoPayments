@@ -663,6 +663,68 @@ describe("Server API", () => {
       const body = await res.json();
       expect(body.payment.status).toBe("verified");
     });
+
+    it("stores topup_id when topup param is provided", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "5000000",
+        amountUsd: 5,
+        token: "usdc",
+        blockNumber: 99001,
+        txHash: "0xtopup_tx",
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xtopup_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          topup: "small",
+          apiKey: "test-api-key",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.payment.status).toBe("verified");
+      expect(body.payment.topup_id).toBe("small");
+    });
+
+    it("topup_id is null when topup param is absent", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 99002,
+        txHash: "0xno_topup_tx",
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xno_topup_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          apiKey: "test-api-key",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.payment.plan_id).toBe("starter");
+      expect(body.payment.topup_id).toBeNull();
+    });
   });
 
   // ── GET /api/payment/:id ──
@@ -916,6 +978,103 @@ describe("Server API", () => {
       expect(body.timestamp).toBeDefined();
 
       // Restore original fetch
+      globalThis.fetch = originalFetch;
+    });
+
+    it("includes topup field in callback payload when topup is set", async () => {
+      const originalFetch = globalThis.fetch;
+      const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+      globalThis.fetch = vi.fn(async (url: any, init?: any) => {
+        fetchCalls.push({ url: String(url), init });
+        return new Response("OK", { status: 200 });
+      }) as any;
+
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "5000000",
+        amountUsd: 5,
+        token: "usdc",
+        blockNumber: 12345,
+        txHash: "0xtopup_callback_tx",
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xtopup_callback_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          topup: "small",
+          apiKey: "test-api-key",
+          callbackUrl: "https://bot.example.com/webhook",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      const callbackCall = fetchCalls.find(
+        (c) => c.url === "https://bot.example.com/webhook",
+      );
+      expect(callbackCall).toBeDefined();
+
+      const body = JSON.parse(callbackCall!.init.body as string);
+      expect(body.payment.topup).toBe("small");
+      // plan should be absent (not set)
+      expect(body.payment.plan).toBeUndefined();
+
+      globalThis.fetch = originalFetch;
+    });
+
+    it("omits topup field in callback payload when topup is not set", async () => {
+      const originalFetch = globalThis.fetch;
+      const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+      globalThis.fetch = vi.fn(async (url: any, init?: any) => {
+        fetchCalls.push({ url: String(url), init });
+        return new Response("OK", { status: 200 });
+      }) as any;
+
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 12345,
+        txHash: "0xno_topup_callback_tx",
+      });
+
+      await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xno_topup_callback_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          apiKey: "test-api-key",
+          callbackUrl: "https://bot.example.com/webhook",
+        }),
+      });
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      const callbackCall = fetchCalls.find(
+        (c) => c.url === "https://bot.example.com/webhook",
+      );
+      expect(callbackCall).toBeDefined();
+
+      const body = JSON.parse(callbackCall!.init.body as string);
+      expect(body.payment.topup).toBeUndefined();
+      expect(body.payment.plan).toBe("starter");
+
       globalThis.fetch = originalFetch;
     });
 
