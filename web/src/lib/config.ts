@@ -2,7 +2,9 @@
 
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_URL ||
-  "https://wxxnkncwneyhmudfyayd.supabase.co/functions/v1/crypto-payments";
+  // Live prod edge function (confirmed serving real wallets via /api/config).
+  // The old default ref wxxnkncwneyhmudfyayd is dead (empty /api/health).
+  "https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments";
 
 export type ChainId = "base" | "eth" | "sol" | "ton" | "base_sepolia" | "eth_sepolia";
 export type TokenId = "usdc" | "usdt" | "ausd";
