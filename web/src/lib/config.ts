@@ -24,8 +24,14 @@ export interface PaymentRequest {
   uid: string;
   plan?: string;
   topup?: string;
+  tenantType?: "personal" | "team";
+  vmProvider?: "azure" | "hetzner";
+  hostType?: "vps";
+  amountUsd?: string;
   callbackUrl?: string;
   initData?: string;
+  exp?: string;
+  sig?: string;
 }
 
 export interface PaymentResult {
