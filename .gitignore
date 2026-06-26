@@ -11,3 +11,8 @@ test-results/
 web/out/
 web/.next/
 web/node_modules/
+
+# generated testnet wallets + owner keys (contain private keys) — never commit
+testnet/*.json
+testnet/*.png
+testnet/*.key

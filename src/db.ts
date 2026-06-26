@@ -66,6 +66,7 @@ export interface PaymentIntentRecord {
   block_number: number | null;
   amount_raw: string | null;
   plan_id: string | null;
+  topup_id: string | null;
   description: string | null;
   metadata: Record<string, unknown>;
   succeeded_at: string | null;
@@ -121,6 +122,7 @@ export interface PaymentRecord {
   status: "pending" | "verified" | "failed";
   verified_at: string | null;
   plan_id: string | null;
+  topup_id: string | null;
   from_address: string | null;
   to_address: string | null;
   block_number: number | null;
@@ -136,6 +138,7 @@ export interface InsertPayment {
   amountRaw: string;
   amountUsd: number;
   planId?: string;
+  topupId?: string;
   fromAddress?: string;
   toAddress?: string;
   blockNumber?: number;
@@ -424,6 +427,7 @@ export async function createPaymentIntent(
     chainId?: string;
     token?: string;
     planId?: string;
+    topupId?: string;
     description?: string;
     metadata?: Record<string, unknown>;
   },
@@ -442,6 +446,7 @@ export async function createPaymentIntent(
       chain_id: input.chainId ?? null,
       token: input.token ?? null,
       plan_id: input.planId ?? null,
+      topup_id: input.topupId ?? null,
       description: input.description ?? null,
       metadata: input.metadata ?? {},
     })
@@ -676,11 +681,12 @@ export async function insertPayment(db: DB, p: InsertPayment): Promise<PaymentRe
     chainId: p.chainId,
     token: p.token,
     planId: p.planId,
+    topupId: p.topupId,
   });
 
   // Set tx_hash and metadata directly
   if (p.txHash) {
-    await db
+    const { error: txUpdateError } = await db
       .from("payment_intents")
       .update({
         tx_hash: p.txHash,
@@ -690,6 +696,7 @@ export async function insertPayment(db: DB, p: InsertPayment): Promise<PaymentRe
         amount_raw: p.amountRaw,
       })
       .eq("id", pi.id);
+    if (txUpdateError) throw new Error("Failed to set payment tx details: " + txUpdateError.message);
   }
 
   return piToPaymentRecord(
@@ -766,6 +773,7 @@ function piToPaymentRecord(pi: PaymentIntentRecord, customer: CustomerRecord): P
     status: pi.status === "succeeded" ? "verified" : pi.status === "failed" ? "failed" : "pending",
     verified_at: pi.succeeded_at,
     plan_id: pi.plan_id,
+    topup_id: pi.topup_id,
     from_address: pi.from_address,
     to_address: pi.to_address,
     block_number: pi.block_number,

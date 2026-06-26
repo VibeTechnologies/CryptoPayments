@@ -15,6 +15,12 @@ import { AmountDisplay } from "@/components/amount-display";
 import { WalletConnect } from "@/components/wallet-connect";
 import { StatusMessage, type StatusType } from "@/components/status-message";
 
+const TOPUP_PACKS: Record<string, { label: string; price: number; stars: number }> = {
+  small:  { label: "Small Pack",  price: 5,  stars: 200 },
+  medium: { label: "Medium Pack", price: 10, stars: 400 },
+  large:  { label: "Large Pack",  price: 25, stars: 1000 },
+};
+
 // Telegram WebApp types
 declare global {
   interface Window {
@@ -98,6 +104,8 @@ export default function PayPage() {
         pName = user.first_name || "";
       }
       // Parse start_param: "plan_uid"
+      // Note: top-ups are passed via the ?topup= query param, not start_param.
+      // start_param carries only plan+uid for subscription flows.
       const startParam = tg.initDataUnsafe?.start_param;
       if (startParam && !params.get("uid")) {
         const parts = startParam.split("_");
@@ -128,10 +136,16 @@ export default function PayPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  // Get price for current plan
-  const price = amountUsd
+  // Reject unknown topup keys not backed by an explicit amount —
+  // silently falling back would charge the wrong amount.
+  const isUnknownTopup = topup !== "" && !(topup in TOPUP_PACKS) && !amountUsd;
+
+  // Price: known top-up pack price, else explicit amountUsd, else plan price.
+  const price = topup && topup in TOPUP_PACKS
+    ? TOPUP_PACKS[topup].price
+    : amountUsd
     ? Number(amountUsd)
-    : config?.prices[plan] ?? config?.prices.starter ?? 10;
+    : (config?.prices[plan] ?? config?.prices.starter ?? 10);
 
   // Filter chains — hide testnets unless ?test=true
   const visibleChains = showTestnets ? CHAINS : CHAINS.filter((c) => !c.testnet);
@@ -182,12 +196,16 @@ export default function PayPage() {
 
       if (result.payment?.status === "verified") {
         const p = result.payment;
-        const planName = p.plan_id
-          ? p.plan_id.charAt(0).toUpperCase() + p.plan_id.slice(1)
+        const topupKey = p.topup_id || topup;
+        const topupPack = topupKey ? TOPUP_PACKS[topupKey] : null;
+        const label = topupPack
+          ? `${topupPack.label} ($${topupPack.price}) — `
+          : p.plan_id
+          ? `${p.plan_id.charAt(0).toUpperCase() + p.plan_id.slice(1)} plan — `
           : "";
         setStatus({
           type: "success",
-          message: `Payment verified! ${planName ? `${planName} plan — ` : ""}$${p.amount_usd.toFixed(2)} ${p.token.toUpperCase()}`,
+          message: `Payment verified! ${label}$${p.amount_usd.toFixed(2)} ${p.token.toUpperCase()}`,
         });
         setVerified(true);
 
@@ -239,7 +257,10 @@ export default function PayPage() {
         <div className="mb-6">
           <h1 className="text-xl font-semibold tracking-tight">Pay with Crypto</h1>
           <p className="mt-1 text-sm text-muted">
-            {userName} — {topup ? `${topup.charAt(0).toUpperCase() + topup.slice(1)} top-up` : `${plan.charAt(0).toUpperCase() + plan.slice(1)} plan`}
+            {userName} —{" "}
+            {topup
+              ? `Credit Top-Up: ${TOPUP_PACKS[topup]?.label ?? `${topup.charAt(0).toUpperCase() + topup.slice(1)} top-up`}`
+              : `${plan.charAt(0).toUpperCase() + plan.slice(1)} plan`}
           </p>
         </div>
 
@@ -287,16 +308,19 @@ export default function PayPage() {
               walletAddress={walletAddress}
               amount={price}
               onTxSent={handleTxSent}
-              disabled={verified || submitting}
+              disabled={verified || submitting || isUnknownTopup}
               onStatus={(type, msg) => setStatus({ type, message: msg })}
             />
           </div>
         </section>
 
         {/* Status */}
-        {status && (
+        {(isUnknownTopup || status) && (
           <div className="mt-4">
-            <StatusMessage type={status.type} message={status.message} />
+            <StatusMessage
+              type={isUnknownTopup ? "error" : status!.type}
+              message={isUnknownTopup ? `Unknown top-up pack: ${topup}` : status!.message}
+            />
           </div>
         )}
 

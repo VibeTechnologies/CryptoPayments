@@ -2,10 +2,12 @@
 
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_URL ||
+  // Live prod edge function (confirmed serving real wallets via /api/config).
+  // The old default ref wxxnkncwneyhmudfyayd is dead (empty /api/health).
   "https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments";
 
 export type ChainId = "base" | "eth" | "sol" | "ton" | "base_sepolia" | "eth_sepolia";
-export type TokenId = "usdc" | "usdt";
+export type TokenId = "usdc" | "usdt" | "ausd";
 
 export interface AppConfig {
   wallets: Record<ChainId, string>;
@@ -40,6 +42,7 @@ export interface PaymentResult {
     token: string;
     chain_id: string;
     plan_id?: string;
+    topup_id?: string | null;
     tx_hash: string;
   };
   error?: string;
@@ -51,12 +54,13 @@ export const CHAINS: { id: ChainId; name: string; icon: string; testnet?: boolea
   { id: "sol", name: "Solana", icon: "◎" },
   { id: "ton", name: "TON", icon: "💎" },
   { id: "base_sepolia", name: "Base Sepolia", icon: "🧪", testnet: true },
-  { id: "eth_sepolia", name: "Eth Sepolia", icon: "🧪", testnet: true },
+  { id: "eth_sepolia", name: "Ethereum Sepolia", icon: "🧪", testnet: true },
 ];
 
 export const TOKENS: { id: TokenId; name: string }[] = [
   { id: "usdc", name: "USDC" },
   { id: "usdt", name: "USDT" },
+  { id: "ausd", name: "aUSD" },
 ];
 
 // EVM chain IDs for wallet_switchEthereumChain
@@ -88,7 +92,7 @@ export const EVM_CHAIN_PARAMS: Record<
   eth_sepolia: {
     chainId: "0xaa36a7",
     chainName: "Ethereum Sepolia",
-    rpcUrls: ["https://rpc.sepolia.org"],
+    rpcUrls: ["https://ethereum-sepolia-rpc.publicnode.com"],
     nativeCurrency: { name: "Sepolia Ether", symbol: "ETH", decimals: 18 },
     blockExplorerUrls: ["https://sepolia.etherscan.io"],
   },

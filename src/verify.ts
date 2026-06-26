@@ -16,7 +16,7 @@ export interface VerifiedTransfer {
   /** Human-readable USD amount */
   amountUsd: number;
   /** Which token was transferred */
-  token: "usdt" | "usdc";
+  token: "usdt" | "usdc" | "ausd";
   blockNumber: number;
   txHash: string;
 }
@@ -30,9 +30,18 @@ export async function verifyEvmTransfer(
   chainId: "base" | "eth" | "base_sepolia" | "eth_sepolia",
   config: Config,
 ): Promise<VerifiedTransfer | null> {
-  const chain = chainId === "base_sepolia" ? baseSepolia : chainId === "eth_sepolia" ? sepolia : chainId === "base" ? base : mainnet;
-  const rpcUrl = chainId === "base_sepolia" ? config.rpc.base_sepolia : chainId === "eth_sepolia" ? config.rpc.eth_sepolia : chainId === "base" ? config.rpc.base : config.rpc.eth;
-  const recipientWallet = (chainId === "base_sepolia" ? config.wallets.base_sepolia : chainId === "eth_sepolia" ? config.wallets.eth_sepolia : chainId === "base" ? config.wallets.base : config.wallets.eth).toLowerCase();
+  const chain = chainId === "base_sepolia" ? baseSepolia
+    : chainId === "eth_sepolia" ? sepolia
+    : chainId === "base" ? base
+    : mainnet;
+  const rpcUrl = chainId === "base_sepolia" ? config.rpc.base_sepolia
+    : chainId === "eth_sepolia" ? config.rpc.eth_sepolia
+    : chainId === "base" ? config.rpc.base
+    : config.rpc.eth;
+  const recipientWallet = (chainId === "base_sepolia" ? config.wallets.base_sepolia
+    : chainId === "eth_sepolia" ? config.wallets.eth_sepolia
+    : chainId === "base" ? config.wallets.base
+    : config.wallets.eth).toLowerCase();
 
   if (!recipientWallet) {
     throw new Error(`No wallet configured for chain ${chainId}`);
@@ -56,14 +65,16 @@ export async function verifyEvmTransfer(
   const tokens = TOKEN_ADDRESSES[chainId];
   const usdtAddress = tokens.usdt.toLowerCase();
   const usdcAddress = tokens.usdc.toLowerCase();
+  const ausdAddress = tokens.ausd?.toLowerCase() ?? "";
 
   for (const log of receipt.logs) {
     const contractAddress = log.address.toLowerCase();
 
     // Check if this log is from a known stablecoin
-    let token: "usdt" | "usdc" | null = null;
+    let token: "usdt" | "usdc" | "ausd" | null = null;
     if (contractAddress === usdtAddress) token = "usdt";
     else if (contractAddress === usdcAddress) token = "usdc";
+    else if (ausdAddress && contractAddress === ausdAddress) token = "ausd";
     else continue;
 
     // Check if it matches the Transfer event signature
@@ -191,7 +202,7 @@ export async function verifyTonTransfer(
 
   for (const transfer of transfers) {
     const jettonMaster = transfer.jetton_master?.toLowerCase() ?? "";
-    let token: "usdt" | "usdc" | null = null;
+    let token: "usdt" | "usdc" | "ausd" | null = null;
     if (jettonMaster === usdtMaster) token = "usdt";
     else if (jettonMaster === usdcMaster) token = "usdc";
     else continue;
@@ -312,7 +323,7 @@ export async function verifySolTransfer(
     const destAta = info.destination;
     const mint = info.mint ?? findMintForAccount(tx.meta?.postTokenBalances, accountKeys, destAta);
 
-    let token: "usdt" | "usdc" | null = null;
+    let token: "usdt" | "usdc" | "ausd" | null = null;
     if (mint === usdtMint) token = "usdt";
     else if (mint === usdcMint) token = "usdc";
     else continue;

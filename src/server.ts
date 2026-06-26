@@ -42,6 +42,8 @@ import { verifyTelegramInitData } from "./telegram.ts";
 const config = loadConfig();
 const db = createDB(config.supabaseUrl, config.supabaseKey);
 
+const TOPUP_PRICES: Record<string, number> = { small: 5, medium: 10, large: 25 };
+
 // ── App factory (for testing) ────────────────────────────────────────────────
 
 export function createApp(injectedDb?: DB) {
@@ -116,7 +118,7 @@ export function createApp(injectedDb?: DB) {
   // ── Health ──────────────────────────────────────────────────────────────────
 
   app.get("/api/health", (c) =>
-    c.json({ ok: true, chains: ["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"], tokens: ["usdt", "usdc"] }),
+    c.json({ ok: true, chains: ["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"], tokens: ["usdt", "usdc", "ausd"] }),
   );
 
   // ── Public config ──────────────────────────────────────────────────────────
@@ -200,8 +202,12 @@ export function createApp(injectedDb?: DB) {
     }
 
     const token = body.token || "usdt";
-    if (!["usdt", "usdc"].includes(token)) {
-      return c.json({ error: "token must be usdt or usdc" }, 400);
+    if (!["usdt", "usdc", "ausd"].includes(token)) {
+      return c.json({ error: "token must be usdt, usdc, or ausd" }, 400);
+    }
+
+    if (body.topup !== undefined && !(body.topup in TOPUP_PRICES)) {
+      return c.json({ error: "topup must be small, medium, or large" }, 400);
     }
 
     // ── Duplicate check ──
@@ -211,16 +217,23 @@ export function createApp(injectedDb?: DB) {
     }
 
     // ── Insert pending payment ──
-    const payment = await insertPayment(appDb, {
-      idType: body.idType,
-      uid: body.uid,
-      txHash: body.txHash,
-      chainId: body.chainId,
-      token,
-      amountRaw: "0",
-      amountUsd: 0,
-      planId: body.plan ?? undefined,
-    });
+    let payment: PaymentRecord;
+    try {
+      payment = await insertPayment(appDb, {
+        idType: body.idType,
+        uid: body.uid,
+        txHash: body.txHash,
+        chainId: body.chainId,
+        token,
+        amountRaw: "0",
+        amountUsd: 0,
+        planId: body.topup ? undefined : (body.plan ?? undefined),
+        topupId: body.topup ?? undefined,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: `Failed to record payment: ${msg}` }, 500);
+    }
 
     // ── Verify on-chain ──
     try {
@@ -232,6 +245,14 @@ export function createApp(injectedDb?: DB) {
         return c.json({ payment: updated, error: "Transfer not found or not to our wallet" }, 400);
       }
 
+      // Top-up flow (#29): require the on-chain amount to cover the pack price.
+      if (body.topup && result.amountUsd < TOPUP_PRICES[body.topup]) {
+        await markPaymentFailed(appDb, payment.id);
+        const updated = await getPaymentById(appDb, payment.id);
+        return c.json({ payment: updated, error: `Underpaid: expected $${TOPUP_PRICES[body.topup]}, got $${result.amountUsd}` }, 400);
+      }
+
+      // Plan flow (main): resolve & validate the plan against the verified amount.
       const planId = resolveplan(result.amountUsd, config.prices);
       const signedAmountUsd = Number(body.amountUsd);
       const matchesSignedIntentAmount = checkoutIntentVerified &&
@@ -483,6 +504,7 @@ export function createApp(injectedDb?: DB) {
       chain_id?: string;
       token?: string;
       plan_id?: string;
+      topup_id?: string;
       description?: string;
       metadata?: Record<string, unknown>;
     }>();
@@ -498,6 +520,7 @@ export function createApp(injectedDb?: DB) {
       chainId: body.chain_id,
       token: body.token,
       planId: body.plan_id,
+      topupId: body.topup_id,
       description: body.description,
       metadata: body.metadata,
     });
@@ -678,7 +701,8 @@ async function sendCallback(
       id: payment.id,
       idType: payment.id_type,
       uid: payment.uid,
-      plan: payment.plan_id,
+      plan: payment.plan_id ?? undefined,
+      topup: payment.topup_id ?? undefined,
       chain: payment.chain_id,
       token: payment.token,
       amountUsd: payment.amount_usd,

@@ -64,7 +64,7 @@ export function loadConfig(): Config {
       sol: env("RPC_SOL", "https://api.mainnet-beta.solana.com"),
       ton: env("RPC_TON", "https://toncenter.com/api/v3"),
       base_sepolia: env("RPC_BASE_SEPOLIA", "https://sepolia.base.org"),
-      eth_sepolia: env("RPC_ETH_SEPOLIA", "https://rpc.sepolia.org"),
+      eth_sepolia: env("RPC_ETH_SEPOLIA", "https://ethereum-sepolia-rpc.publicnode.com"),
     },
     prices: {
       starter: Number(env("PRICE_STARTER")) || 10,
@@ -83,7 +83,7 @@ export function loadConfig(): Config {
 export type ChainId = "base" | "eth" | "ton" | "sol" | "base_sepolia" | "eth_sepolia";
 
 /** Token contract/mint addresses per chain (all 6 decimals) */
-export const TOKEN_ADDRESSES: Record<ChainId, { usdt: string; usdc: string }> = {
+export const TOKEN_ADDRESSES: Record<ChainId, { usdt: string; usdc: string; ausd?: string }> = {
   base: {
     usdt: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",
     usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -105,9 +105,10 @@ export const TOKEN_ADDRESSES: Record<ChainId, { usdt: string; usdc: string }> = 
     usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // Circle testnet USDC
   },
   eth_sepolia: {
-    usdt: "0x", // No official USDT on Eth Sepolia — placeholder
-    usdc: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", // Circle testnet USDC
+    usdt: "0x", // No official USDT on Ethereum Sepolia — placeholder
+    usdc: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", // Circle testnet USDC on Eth Sepolia
+    ausd: "0x76B2AeC049e93FB53f210a4B0f02fe3Dee6514C3", // AgentUSD — deployed 2026-06-26
   },
 };
 
-export type TokenId = "usdt" | "usdc";
+export type TokenId = "usdt" | "usdc" | "ausd";
