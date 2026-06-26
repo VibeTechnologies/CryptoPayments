@@ -21,6 +21,7 @@ export interface PaymentRequest {
   idType: "tg" | "email";
   uid: string;
   plan?: string;
+  topup?: string;
   callbackUrl?: string;
   initData?: string;
 }

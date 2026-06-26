@@ -15,6 +15,12 @@ import { AmountDisplay } from "@/components/amount-display";
 import { WalletConnect } from "@/components/wallet-connect";
 import { StatusMessage, type StatusType } from "@/components/status-message";
 
+const TOPUP_PACKS: Record<string, { label: string; price: number; stars: number }> = {
+  small:  { label: "Small Pack",  price: 5,  stars: 200 },
+  medium: { label: "Medium Pack", price: 10, stars: 400 },
+  large:  { label: "Large Pack",  price: 25, stars: 1000 },
+};
+
 // Telegram WebApp types
 declare global {
   interface Window {
@@ -43,6 +49,7 @@ export default function PayPage() {
   const [plan, setPlan] = useState("starter");
   const [uid, setUid] = useState("");
   const [idType, setIdType] = useState<"tg" | "email">("tg");
+  const [topup, setTopup] = useState<string>("");
   const [callbackUrl, setCallbackUrl] = useState("");
   const [initData, setInitData] = useState("");
   const [userName, setUserName] = useState("");
@@ -69,6 +76,7 @@ export default function PayPage() {
 
     let pUid = params.get("uid") || "";
     let pPlan = params.get("plan") || "starter";
+    const pTopup = params.get("topup") || "";
     let pIdType = (params.get("idtype") || "tg") as "tg" | "email";
     let pCallback = params.get("callback") || "";
     let pName = "";
@@ -95,6 +103,7 @@ export default function PayPage() {
     }
 
     setPlan(pPlan);
+    setTopup(pTopup);
     setUid(pUid);
     setIdType(pIdType);
     setCallbackUrl(pCallback);
@@ -108,7 +117,9 @@ export default function PayPage() {
   }, []);
 
   // Get price for current plan
-  const price = config?.prices[plan] ?? config?.prices.starter ?? 10;
+  const price = topup
+    ? (TOPUP_PACKS[topup]?.price ?? 5)
+    : (config?.prices[plan] ?? config?.prices.starter ?? 10);
 
   // Filter chains — hide testnets unless ?test=true
   const visibleChains = showTestnets ? CHAINS : CHAINS.filter((c) => !c.testnet);
@@ -126,7 +137,7 @@ export default function PayPage() {
       await doSubmit(hash);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedChain, selectedToken, idType, uid, plan, callbackUrl, initData],
+    [selectedChain, selectedToken, idType, uid, plan, topup, callbackUrl, initData],
   );
 
   // Submit payment for verification
@@ -145,7 +156,7 @@ export default function PayPage() {
         token: selectedToken,
         idType,
         uid,
-        plan,
+        ...(topup ? { topup } : { plan }),
         callbackUrl: callbackUrl || undefined,
         initData: initData || undefined,
       });
@@ -209,7 +220,10 @@ export default function PayPage() {
         <div className="mb-6">
           <h1 className="text-xl font-semibold tracking-tight">Pay with Crypto</h1>
           <p className="mt-1 text-sm text-muted">
-            {userName} — {plan.charAt(0).toUpperCase() + plan.slice(1)} plan
+            {userName} —{" "}
+            {topup
+              ? `Credit Top-Up: ${TOPUP_PACKS[topup]?.label ?? topup}`
+              : `${plan.charAt(0).toUpperCase() + plan.slice(1)} plan`}
           </p>
         </div>
 
