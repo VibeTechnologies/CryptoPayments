@@ -1121,7 +1121,9 @@ describe("Server API", () => {
       expect(body.payment.chain).toBe("base");
       expect(body.payment.token).toBe("usdc");
       expect(body.payment.amountUsd).toBe(10);
-      expect(body.payment.plan).toBe("starter");
+      // Top-up wins over plan (PR #29): when both are sent, plan_id is nulled and
+      // the consumer (OpenClawBot crypto-webhook) routes by topup, ignoring plan.
+      expect(body.payment.plan).toBeUndefined();
       expect(body.payment.topup).toBe("medium");
       expect(body.payment.tenantType).toBe("team");
       expect(body.payment.vmProvider).toBe("hetzner");
