@@ -33,6 +33,10 @@ CALLBACK_SECRET="testsecret"
 SERVER_PORT="9971"
 CALLBACK_PORT="9972"
 TEST_UID="77777"
+# POST /api/payment requires auth (initData | apiKey | signed checkout intent).
+# Configure the server with an API key and send it on the request so the E2E
+# exercises the real auth path instead of relying on open access.
+API_KEY_E2E="e2e-test-key"
 
 export PATH="$HOME/.foundry/bin:$PATH"
 
@@ -172,6 +176,7 @@ echo "== [3] start CryptoPayments server on :$SERVER_PORT =="
   RPC_ETH_SEPOLIA="$RPC" \
   WALLET_ETH_SEPOLIA="$RECIPIENT" \
   CALLBACK_SECRET="$CALLBACK_SECRET" \
+  API_KEY="$API_KEY_E2E" \
   PORT="$SERVER_PORT" \
   exec npx tsx tests/e2e-server-wrapper.ts
 ) > "$SERVER_LOG" 2>&1 &
@@ -193,9 +198,9 @@ echo "   server healthy"
 # 4. POST /api/payment — verify the REAL on-chain tx for the small top-up
 # ----------------------------------------------------------------------------
 echo "== [4] POST /api/payment (token=ausd topup=small) =="
-REQ_BODY="$(python3 - "$TX_HASH" "$TEST_UID" "$CALLBACK_PORT" <<'PY'
+REQ_BODY="$(python3 - "$TX_HASH" "$TEST_UID" "$CALLBACK_PORT" "$API_KEY_E2E" <<'PY'
 import json, sys
-tx, uid, cbport = sys.argv[1], sys.argv[2], sys.argv[3]
+tx, uid, cbport, api_key = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 print(json.dumps({
     "txHash": tx,
     "chainId": "eth_sepolia",
@@ -203,6 +208,7 @@ print(json.dumps({
     "idType": "tg",
     "uid": uid,
     "topup": "small",
+    "apiKey": api_key,
     "callbackUrl": f"http://localhost:{cbport}",
 }))
 PY
