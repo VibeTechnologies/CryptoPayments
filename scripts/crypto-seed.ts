@@ -400,7 +400,7 @@ async function main() {
     WALLET_SOL: solWallet.address,
     API_KEY: apiKey,
     CALLBACK_SECRET: callbackSecret,
-    SUPABASE_URL: `https://wxxnkncwneyhmudfyayd.supabase.co`,
+    SUPABASE_URL: `https://krjbwbvmrpazdmmjstzo.supabase.co`,
   };
   updateEnvFile(envPath, envUpdates);
   console.log("  .env updated ✓");
@@ -414,7 +414,7 @@ async function main() {
     WALLET_SOL: solWallet.address,
     API_KEY: apiKey,
     CALLBACK_SECRET: callbackSecret,
-    SUPABASE_URL: `https://wxxnkncwneyhmudfyayd.supabase.co`,
+    SUPABASE_URL: `https://krjbwbvmrpazdmmjstzo.supabase.co`,
     SUPABASE_SERVICE_ROLE_KEY: existingEnv.match(
       /^SUPABASE_SERVICE_ROLE_KEY=(.+)$/m
     )?.[1] || "",

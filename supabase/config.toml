@@ -1,6 +1,6 @@
 # For detailed configuration reference documentation, visit:
 # https://supabase.com/docs/guides/local-development/cli/config
-project_id = "wxxnkncwneyhmudfyayd"
+project_id = "krjbwbvmrpazdmmjstzo"
 
 [api]
 enabled = true
