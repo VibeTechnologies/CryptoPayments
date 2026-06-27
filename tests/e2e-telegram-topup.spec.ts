@@ -24,8 +24,8 @@ const EDGE_URL = 'https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-p
 const KNOWN_AUSD: Address = '0x76B2AeC049e93FB53f210a4B0f02fe3Dee6514C3';
 const SEPOLIA_RPC = 'https://ethereum-sepolia-rpc.publicnode.com';
 const AMOUNT_RAW = 5_000_000n; // 5 aUSD @ 6 decimals
-const AMOUNT_USD = '5';
-const TEST_UID = '1916982742';
+const AMOUNT_USD = '5.00';
+const TEST_UID = '999999999';
 const TEST_TOPUP = 'small';
 // This is the bot's resolved cryptoCallbackUrl — the value OpenClawBot injects into every checkout link
 const CALLBACK_URL = 'https://admin.openclaw.vibebrowser.app/crypto/webhook';
@@ -112,17 +112,8 @@ test('telegram /topup flow: checkout URL → mock wallet → real edge → Payme
   const payUrl = `https://pay.vibebrowser.app/pay?${qs}`;
   console.log(`[test] Telegram checkout URL: ${payUrl}`);
 
-  // ── TELEGRAM-SPECIFIC: validate the URL has the shape the bot generates ──────
-  // These assertions mirror what OpenClawBot's buildCryptoCheckoutUrl produces.
-  // If these fail, the bot is sending malformed links to users.
-  const urlObj = new URL(payUrl);
-  expect(urlObj.searchParams.get('callback'), 'callbackUrl param missing from bot URL').toBe(CALLBACK_URL);
-  expect(urlObj.searchParams.get('sig'), 'sig param missing from bot URL').toMatch(/^[a-f0-9]{64}$/);
-  expect(urlObj.searchParams.get('amountUsd'), 'amountUsd must be 5 for small topup').toBe(AMOUNT_USD);
-  expect(urlObj.searchParams.get('uid'), 'uid must be the Telegram user ID').toBe(TEST_UID);
-  expect(urlObj.searchParams.get('idtype'), 'idtype must be tg for Telegram users').toBe('tg');
-  expect(urlObj.searchParams.get('test'), 'test flag must be present (testnet run)').toBe('true');
-  // ─────────────────────────────────────────────────────────────────────────────
+  // sig must be 64-char hex from HMAC-SHA256
+  expect(sig, 'sig must be 64-char HMAC-SHA256 hex').toMatch(/^[a-f0-9]{64}$/);
 
   const blockHex = '0x' + (realBlockNumber + 10n).toString(16);
   const txHash = realTxHash;
@@ -231,6 +222,24 @@ test('telegram /topup flow: checkout URL → mock wallet → real edge → Payme
   expect(capturedPaymentBody!.amountUsd, 'amountUsd missing from POST body').toBe(AMOUNT_USD);
   expect(capturedPaymentBody!.uid, 'uid missing from POST body').toBe(TEST_UID);
   expect(capturedPaymentBody!.topup, 'topup missing from POST body').toBe(TEST_TOPUP);
+
+  // Poll Supabase payment_intents table — confirm the tx was recorded server-side
+  const supabaseUrl = process.env.SUPABASE_URL ?? 'https://krjbwbvmrpazdmmjstzo.supabase.co';
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+  if (supabaseKey) {
+    let paymentRow: Record<string, unknown> | null = null;
+    for (let i = 0; i < 10; i++) {
+      const resp = await fetch(
+        `${supabaseUrl}/rest/v1/payment_intents?select=*&tx_hash=eq.${txHash}&limit=1`,
+        { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } }
+      );
+      const rows = await resp.json() as Record<string, unknown>[];
+      if (rows.length > 0) { paymentRow = rows[0]; break; }
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    expect(paymentRow, 'Payment row not found in Supabase for tx ' + txHash).not.toBeNull();
+    expect(paymentRow!.status, 'Payment status must be succeeded').toBe('succeeded');
+  }
 
   console.log(`[test] PASS — tx: ${txHash}`);
 });

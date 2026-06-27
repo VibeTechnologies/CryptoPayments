@@ -1,0 +1,52 @@
+# Playwright E2E test for CryptoPayments Telegram top-up flow.
+# Runs a real Sepolia ERC20 transfer — requires a funded testnet wallet.
+#
+# Required secrets (repo Settings → Secrets → Actions):
+#   CHECKOUT_SECRET         — HMAC secret checked by the /webhook/checkout endpoint
+#   TESTNET_WALLET_1_JSON   — base64-encoded contents of testnet/wallet-1.json
+#   SUPABASE_SERVICE_ROLE_KEY — Supabase service-role key for the test project
+
+name: E2E – Telegram top-up
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e-topup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Write testnet wallet
+        run: |
+          mkdir -p testnet
+          echo "${{ secrets.TESTNET_WALLET_1_JSON }}" | base64 -d > testnet/wallet-1.json
+
+      - name: Run E2E test
+        env:
+          CHECKOUT_SECRET: ${{ secrets.CHECKOUT_SECRET }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node_modules/.bin/playwright test tests/e2e-telegram-topup.spec.ts --reporter=list
