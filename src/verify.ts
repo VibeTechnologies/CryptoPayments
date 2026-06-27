@@ -1,5 +1,5 @@
 import { createPublicClient, http, parseAbiItem, type Address, formatUnits } from "viem";
-import { base, baseSepolia, mainnet, sepolia } from "viem/chains";
+import { arbitrum, base, baseSepolia, mainnet, sepolia } from "viem/chains";
 import type { ChainId, Config } from "./config.ts";
 import { TOKEN_ADDRESSES } from "./config.ts";
 
@@ -7,6 +7,28 @@ import { TOKEN_ADDRESSES } from "./config.ts";
 const TRANSFER_EVENT = parseAbiItem(
   "event Transfer(address indexed from, address indexed to, uint256 value)"
 );
+
+/**
+ * Minimum on-chain confirmations required before marking a transfer verified.
+ * Testnet values are 1 so the live E2E (1 mined block) still passes.
+ */
+const MIN_CONFIRMATIONS: Record<"base" | "eth" | "arbitrum" | "base_sepolia" | "eth_sepolia", number> = {
+  eth: 12,
+  base: 5,
+  arbitrum: 5,
+  base_sepolia: 1,
+  eth_sepolia: 1,
+};
+
+/**
+ * ERC-20 token decimal places. All current supported stablecoins use 6.
+ * Add 18-decimal tokens here when they are onboarded — never hardcode 6 inline.
+ */
+const TOKEN_DECIMALS: Record<"usdt" | "usdc" | "ausd", number> = {
+  usdt: 6,
+  usdc: 6,
+  ausd: 6,
+};
 
 export interface VerifiedTransfer {
   from: string;
@@ -27,20 +49,23 @@ export interface VerifiedTransfer {
  */
 export async function verifyEvmTransfer(
   txHash: string,
-  chainId: "base" | "eth" | "base_sepolia" | "eth_sepolia",
+  chainId: "base" | "eth" | "arbitrum" | "base_sepolia" | "eth_sepolia",
   config: Config,
 ): Promise<VerifiedTransfer | null> {
   const chain = chainId === "base_sepolia" ? baseSepolia
     : chainId === "eth_sepolia" ? sepolia
     : chainId === "base" ? base
+    : chainId === "arbitrum" ? arbitrum
     : mainnet;
   const rpcUrl = chainId === "base_sepolia" ? config.rpc.base_sepolia
     : chainId === "eth_sepolia" ? config.rpc.eth_sepolia
     : chainId === "base" ? config.rpc.base
+    : chainId === "arbitrum" ? config.rpc.arbitrum
     : config.rpc.eth;
   const recipientWallet = (chainId === "base_sepolia" ? config.wallets.base_sepolia
     : chainId === "eth_sepolia" ? config.wallets.eth_sepolia
     : chainId === "base" ? config.wallets.base
+    : chainId === "arbitrum" ? config.wallets.arbitrum
     : config.wallets.eth).toLowerCase();
 
   if (!recipientWallet) {
@@ -59,6 +84,14 @@ export async function verifyEvmTransfer(
 
   if (!receipt || receipt.status === "reverted") {
     return null;
+  }
+
+  // Confirmation-count gate: protect against block reorganisations.
+  // Testnets use 1 so a freshly mined tx passes immediately.
+  const currentBlock = await client.getBlockNumber();
+  const confirmations = Number(currentBlock - receipt.blockNumber) + 1;
+  if (confirmations < MIN_CONFIRMATIONS[chainId]) {
+    return null; // not yet confirmed — caller can retry
   }
 
   // Look for Transfer events to our wallet from known stablecoins
@@ -90,7 +123,7 @@ export async function verifyEvmTransfer(
 
     const from = "0x" + log.topics[1].slice(26);
     const value = BigInt(log.data);
-    const amountUsd = Number(formatUnits(value, 6));
+    const amountUsd = Number(formatUnits(value, TOKEN_DECIMALS[token]));
 
     return {
       from,
@@ -118,7 +151,8 @@ export async function verifyTonTransfer(
   txHash: string,
   config: Config,
 ): Promise<VerifiedTransfer | null> {
-  const recipientWallet = config.wallets.ton.toLowerCase();
+  // TON base64 addresses are case-sensitive — do NOT lowercase.
+  const recipientWallet = config.wallets.ton.trim();
   if (!recipientWallet) {
     throw new Error("No wallet configured for TON");
   }
@@ -130,6 +164,7 @@ export async function verifyTonTransfer(
 
   const resp = await fetch(url, {
     headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(10000),
   });
 
   if (!resp.ok) {
@@ -174,12 +209,12 @@ export async function verifyTonTransfer(
   const jettonUrl = `${apiBase}/jetton/transfers?transaction_hash=${encodeURIComponent(txHash)}&limit=10`;
   const jettonResp = await fetch(jettonUrl, {
     headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(10000),
   });
 
   if (!jettonResp.ok) {
-    // Fallback: API might not support /jetton/transfers, return null
-    console.error(`TON Jetton API error: ${jettonResp.status}`);
-    return null;
+    // Throw loudly so callers know the result is indeterminate, not "not found".
+    throw new Error(`TON Jetton API error: ${jettonResp.status} ${jettonResp.statusText}`);
   }
 
   const jettonData = await jettonResp.json() as {
@@ -207,8 +242,8 @@ export async function verifyTonTransfer(
     else if (jettonMaster === usdcMaster) token = "usdc";
     else continue;
 
-    // Check destination matches our wallet
-    const dest = transfer.destination?.toLowerCase() ?? "";
+    // TON base64 addresses are case-sensitive — compare raw (no toLowerCase).
+    const dest = transfer.destination?.trim() ?? "";
     if (dest !== recipientWallet) continue;
 
     // TON USDT/USDC are 6 decimals
@@ -257,7 +292,7 @@ export async function verifySolTransfer(
         {
           encoding: "jsonParsed",
           maxSupportedTransactionVersion: 0,
-          commitment: "confirmed",
+          commitment: "finalized",
         },
       ],
     }),
@@ -434,6 +469,7 @@ export async function verifyTransfer(
   switch (chainId) {
     case "base":
     case "eth":
+    case "arbitrum":
     case "base_sepolia":
     case "eth_sepolia":
       return verifyEvmTransfer(txHash, chainId, config);

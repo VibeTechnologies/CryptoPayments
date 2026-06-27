@@ -44,6 +44,24 @@ const db = createDB(config.supabaseUrl, config.supabaseKey);
 
 const TOPUP_PRICES: Record<string, number> = { small: 5, medium: 10, large: 25 };
 
+/**
+ * Constant-time string comparison to prevent timing-based API key leaks.
+ * Returns false (not true) on length mismatch so unequal lengths are not revealed
+ * by zero-time returns.
+ */
+function timingSafeEqualStr(a: string, b: string): boolean {
+  // Pad the shorter string so both buffers are the same length; the final
+  // timingSafeEqual result is ORed with the length-mismatch flag so an
+  // equal-length match on padded bytes cannot produce a false positive.
+  const lengthsMatch = a.length === b.length;
+  const maxLen = Math.max(a.length, b.length, 1);
+  const bufA = Buffer.alloc(maxLen);
+  const bufB = Buffer.alloc(maxLen);
+  bufA.write(a);
+  bufB.write(b);
+  return timingSafeEqual(bufA, bufB) && lengthsMatch;
+}
+
 // ── App factory (for testing) ────────────────────────────────────────────────
 
 export function createApp(injectedDb?: DB) {
@@ -65,9 +83,11 @@ export function createApp(injectedDb?: DB) {
   // ── API key auth middleware helper ─────────────────────────────────────────
 
   function requireApiKey(c: Context): boolean {
-    if (!config.apiKey) return true;
-    const provided = c.req.header("x-api-key") ?? c.req.query("api_key");
-    return provided === config.apiKey;
+    // Fail-closed: empty API_KEY means no valid key is configured — deny all.
+    if (!config.apiKey) return false;
+    const provided = c.req.header("x-api-key");
+    if (!provided) return false;
+    return timingSafeEqualStr(provided, config.apiKey);
   }
 
   function verifyCheckoutIntent(input: {
@@ -118,7 +138,7 @@ export function createApp(injectedDb?: DB) {
   // ── Health ──────────────────────────────────────────────────────────────────
 
   app.get("/api/health", (c) =>
-    c.json({ ok: true, chains: ["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"], tokens: ["usdt", "usdc", "ausd"] }),
+    c.json({ ok: true, chains: ["base", "eth", "arbitrum", "ton", "sol", "base_sepolia", "eth_sepolia"], tokens: ["usdt", "usdc", "ausd"] }),
   );
 
   // ── Public config ──────────────────────────────────────────────────────────
@@ -128,7 +148,7 @@ export function createApp(injectedDb?: DB) {
       wallets: config.wallets,
       prices: config.prices,
       tokens: TOKEN_ADDRESSES,
-      chains: ["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"],
+      chains: ["base", "eth", "arbitrum", "ton", "sol", "base_sepolia", "eth_sepolia"],
     });
   });
 
@@ -168,7 +188,7 @@ export function createApp(injectedDb?: DB) {
       }
       authed = true;
     } else if (body.apiKey) {
-      if (!config.apiKey || body.apiKey !== config.apiKey) {
+      if (!config.apiKey || !timingSafeEqualStr(body.apiKey, config.apiKey)) {
         return c.json({ error: "Invalid API key" }, 401);
       }
       authed = true;
@@ -191,8 +211,8 @@ export function createApp(injectedDb?: DB) {
     if (!body.txHash || typeof body.txHash !== "string") {
       return c.json({ error: "txHash is required" }, 400);
     }
-    if (!body.chainId || !["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"].includes(body.chainId)) {
-      return c.json({ error: "chainId must be base, eth, ton, sol, base_sepolia, or eth_sepolia" }, 400);
+    if (!body.chainId || !["base", "eth", "arbitrum", "ton", "sol", "base_sepolia", "eth_sepolia"].includes(body.chainId)) {
+      return c.json({ error: "chainId must be base, eth, arbitrum, ton, sol, base_sepolia, or eth_sepolia" }, 400);
     }
     if (!body.idType || !["tg", "email"].includes(body.idType)) {
       return c.json({ error: "idType must be 'tg' or 'email'" }, 400);
@@ -694,6 +714,23 @@ async function sendCallback(
     hostType?: string;
   } = {},
 ): Promise<void> {
+  // SSRF guard: only POST to allowlisted HTTPS hosts.
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(callbackUrl);
+  } catch {
+    console.warn(`[SECURITY] sendCallback: not a valid URL — skipping: ${callbackUrl}`);
+    return;
+  }
+  if (parsedUrl.protocol !== "https:") {
+    console.warn(`[SECURITY] sendCallback: URL must use HTTPS — skipping: ${callbackUrl}`);
+    return;
+  }
+  if (!config.callbackAllowlist.includes(parsedUrl.hostname)) {
+    console.warn(`[SECURITY] sendCallback: host not in allowlist — skipping: ${parsedUrl.hostname}`);
+    return;
+  }
+
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const payload = JSON.stringify({
     event: "payment.verified",

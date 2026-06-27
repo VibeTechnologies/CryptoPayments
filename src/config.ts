@@ -7,6 +7,7 @@ export interface Config {
   wallets: {
     base: string;
     eth: string;
+    arbitrum: string;
     ton: string;
     sol: string;
     base_sepolia: string;
@@ -15,6 +16,7 @@ export interface Config {
   rpc: {
     base: string;
     eth: string;
+    arbitrum: string;
     sol: string;
     ton: string;
     base_sepolia: string;
@@ -35,6 +37,8 @@ export interface Config {
   checkoutSecret: string;
   /** Base URL for the payment page (for generating links) */
   baseUrl: string;
+  /** Allowlisted hostnames for outbound webhook callbacks (SSRF guard) */
+  callbackAllowlist: string[];
 }
 
 /** Read an env var with an optional fallback (Deno + Node compatible). */
@@ -46,6 +50,14 @@ const env = (key: string, fallback = ""): string => {
 };
 
 export function loadConfig(): Config {
+  // Security startup warnings — logged once at boot so ops notices misconfiguration.
+  if (!env("API_KEY")) {
+    console.warn("[SECURITY] API_KEY is empty — all admin endpoints will reject");
+  }
+  if (!env("CHECKOUT_SECRET")) {
+    console.warn("[SECURITY] CHECKOUT_SECRET not set; falling back to CALLBACK_SECRET — set a distinct value");
+  }
+
   return {
     port: Number(env("PORT")) || 3003,
     supabaseUrl: env("SUPABASE_URL"),
@@ -53,6 +65,7 @@ export function loadConfig(): Config {
     wallets: {
       base: env("WALLET_BASE"),
       eth: env("WALLET_ETH"),
+      arbitrum: env("WALLET_ARBITRUM"),
       ton: env("WALLET_TON"),
       sol: env("WALLET_SOL"),
       base_sepolia: env("WALLET_BASE_SEPOLIA", env("WALLET_BASE")),
@@ -61,6 +74,7 @@ export function loadConfig(): Config {
     rpc: {
       base: env("RPC_BASE", "https://mainnet.base.org"),
       eth: env("RPC_ETH", "https://cloudflare-eth.com"),
+      arbitrum: env("RPC_ARBITRUM", "https://arb1.arbitrum.io/rpc"),
       sol: env("RPC_SOL", "https://api.mainnet-beta.solana.com"),
       ton: env("RPC_TON", "https://toncenter.com/api/v3"),
       base_sepolia: env("RPC_BASE_SEPOLIA", "https://sepolia.base.org"),
@@ -76,11 +90,17 @@ export function loadConfig(): Config {
     callbackSecret: env("CALLBACK_SECRET"),
     checkoutSecret: env("CHECKOUT_SECRET", env("CALLBACK_SECRET")),
     baseUrl: env("BASE_URL", "https://pay.openclaw.ai"),
+    // Sourced from docs/DEPLOY-eth-sepolia-topup.md: admin.openclaw.vibebrowser.app is the
+    // OpenClawBot webhook receiver; pay.vibebrowser.app is the payment-service domain.
+    callbackAllowlist: env(
+      "CALLBACK_URL_ALLOWLIST",
+      "admin.openclaw.vibebrowser.app,pay.vibebrowser.app",
+    ).split(",").map((s) => s.trim()).filter(Boolean),
   };
 }
 
 /** Supported chain identifiers */
-export type ChainId = "base" | "eth" | "ton" | "sol" | "base_sepolia" | "eth_sepolia";
+export type ChainId = "base" | "eth" | "arbitrum" | "ton" | "sol" | "base_sepolia" | "eth_sepolia";
 
 /** Token contract/mint addresses per chain (all 6 decimals) */
 export const TOKEN_ADDRESSES: Record<ChainId, { usdt: string; usdc: string; ausd?: string }> = {
@@ -91,6 +111,10 @@ export const TOKEN_ADDRESSES: Record<ChainId, { usdt: string; usdc: string; ausd
   eth: {
     usdt: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
     usdc: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+  },
+  arbitrum: {
+    usdt: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
+    usdc: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
   },
   ton: {
     usdt: "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs",
