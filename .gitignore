@@ -16,3 +16,8 @@ web/node_modules/
 testnet/*.json
 testnet/*.png
 testnet/*.key
+
+# local tooling state (not project code)
+.opencode/
+.supervisor/
+*.tmp
