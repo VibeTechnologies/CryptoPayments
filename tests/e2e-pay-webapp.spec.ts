@@ -147,6 +147,15 @@ test('pay webapp: mock wallet + real edge → Payment verified!', async ({ page 
 
   page.on('console', msg => console.log(`[browser ${msg.type()}] ${msg.text()}`));
 
+  // Intercept the POST to assert the webapp builds the correct body
+  // (callbackUrl flowing through is the entire reason this test exists)
+  let capturedPaymentBody: Record<string, unknown> | null = null;
+  page.on('request', req => {
+    if (req.url().includes('/api/payment') && req.method() === 'POST') {
+      try { capturedPaymentBody = JSON.parse(req.postData() ?? '{}'); } catch { /* ignore */ }
+    }
+  });
+
   await page.goto(payUrl);
 
   // Wait for page to fully load (config fetched, spinner gone)
@@ -174,4 +183,13 @@ test('pay webapp: mock wallet + real edge → Payment verified!', async ({ page 
   // Assert no error visible
   await expect(page.getByText(/verification failed/i)).not.toBeVisible();
   await expect(page.getByText(/transaction failed/i)).not.toBeVisible();
+
+  // Verify the POST body the webapp sent to the edge — this is the core regression guard.
+  // If callbackUrl is dropped, the bot never gets notified and credits are never applied.
+  expect(capturedPaymentBody, 'POST to /api/payment was never intercepted').not.toBeNull();
+  expect(capturedPaymentBody!.callbackUrl, 'callbackUrl missing from POST body').toBe(CALLBACK_URL);
+  expect(capturedPaymentBody!.sig, 'sig missing from POST body').toBe(sig);
+  expect(capturedPaymentBody!.amountUsd, 'amountUsd missing from POST body').toBe(AMOUNT_USD);
+  expect(capturedPaymentBody!.uid, 'uid missing from POST body').toBe(TEST_UID);
+  expect(capturedPaymentBody!.topup, 'topup missing from POST body').toBe(TEST_TOPUP);
 });
