@@ -37,6 +37,8 @@ export interface Config {
   checkoutSecret: string;
   /** Base URL for the payment page (for generating links) */
   baseUrl: string;
+  /** Allowlisted hostnames for outbound webhook callbacks (SSRF guard) */
+  callbackAllowlist: string[];
 }
 
 /** Read an env var with an optional fallback (Deno + Node compatible). */
@@ -48,6 +50,14 @@ const env = (key: string, fallback = ""): string => {
 };
 
 export function loadConfig(): Config {
+  // Security startup warnings — logged once at boot so ops notices misconfiguration.
+  if (!env("API_KEY")) {
+    console.warn("[SECURITY] API_KEY is empty — all admin endpoints will reject");
+  }
+  if (!env("CHECKOUT_SECRET")) {
+    console.warn("[SECURITY] CHECKOUT_SECRET not set; falling back to CALLBACK_SECRET — set a distinct value");
+  }
+
   return {
     port: Number(env("PORT")) || 3003,
     supabaseUrl: env("SUPABASE_URL"),
@@ -80,6 +90,12 @@ export function loadConfig(): Config {
     callbackSecret: env("CALLBACK_SECRET"),
     checkoutSecret: env("CHECKOUT_SECRET", env("CALLBACK_SECRET")),
     baseUrl: env("BASE_URL", "https://pay.openclaw.ai"),
+    // Sourced from docs/DEPLOY-eth-sepolia-topup.md: admin.openclaw.vibebrowser.app is the
+    // OpenClawBot webhook receiver; pay.vibebrowser.app is the payment-service domain.
+    callbackAllowlist: env(
+      "CALLBACK_URL_ALLOWLIST",
+      "admin.openclaw.vibebrowser.app,pay.vibebrowser.app",
+    ).split(",").map((s) => s.trim()).filter(Boolean),
   };
 }
 

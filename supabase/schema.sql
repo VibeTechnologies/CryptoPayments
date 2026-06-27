@@ -180,11 +180,13 @@ ALTER TABLE payment_intents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE checkout_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webhook_events ENABLE ROW LEVEL SECURITY;
 
--- Service role bypasses RLS. These permissive policies ensure
--- the server (using service_role key) can access everything.
-CREATE POLICY service_all ON customers FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY service_all ON invoices FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY service_all ON invoice_line_items FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY service_all ON payment_intents FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY service_all ON checkout_sessions FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY service_all ON webhook_events FOR ALL USING (true) WITH CHECK (true);
+-- Restrict access to service_role only. The server uses the service_role key
+-- and bypasses RLS anyway, but explicitly scoping policies to service_role
+-- removes any implicit grant to anon / authenticated (public) roles.
+-- See migration 20260626140000_rls_service_role_only.sql for the rationale.
+CREATE POLICY service_all ON customers FOR ALL TO service_role USING (true) WITH CHECK (true);
+CREATE POLICY service_all ON invoices FOR ALL TO service_role USING (true) WITH CHECK (true);
+CREATE POLICY service_all ON invoice_line_items FOR ALL TO service_role USING (true) WITH CHECK (true);
+CREATE POLICY service_all ON payment_intents FOR ALL TO service_role USING (true) WITH CHECK (true);
+CREATE POLICY service_all ON checkout_sessions FOR ALL TO service_role USING (true) WITH CHECK (true);
+CREATE POLICY service_all ON webhook_events FOR ALL TO service_role USING (true) WITH CHECK (true);

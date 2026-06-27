@@ -257,7 +257,7 @@ describe("Crypto topup E2E — callback flow", () => {
         uid: "42",
         topup: "small",
         apiKey: "test-api-key",
-        callbackUrl: "https://bot.example.com/webhook",
+        callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
       }),
     });
 
@@ -270,7 +270,7 @@ describe("Crypto topup E2E — callback flow", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     const callbackCall = fetchCalls.find(
-      (c) => c.url === "https://bot.example.com/webhook",
+      (c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook",
     );
     expect(callbackCall).toBeDefined();
     expect(callbackCall!.init.method).toBe("POST");
@@ -309,7 +309,7 @@ describe("Crypto topup E2E — callback flow", () => {
         uid: "42",
         plan: "pro",
         apiKey: "test-api-key",
-        callbackUrl: "https://bot.example.com/webhook",
+        callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
       }),
     });
 
@@ -321,7 +321,7 @@ describe("Crypto topup E2E — callback flow", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     const callbackCall = fetchCalls.find(
-      (c) => c.url === "https://bot.example.com/webhook",
+      (c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook",
     );
     expect(callbackCall).toBeDefined();
 
@@ -392,7 +392,7 @@ describe("Crypto topup E2E — callback flow", () => {
         uid: "42",
         topup: "large",
         apiKey: "test-api-key",
-        callbackUrl: "https://bot.example.com/webhook",
+        callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
       }),
     });
 
@@ -405,7 +405,7 @@ describe("Crypto topup E2E — callback flow", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     const callbackCall = fetchCalls.find(
-      (c) => c.url === "https://bot.example.com/webhook",
+      (c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook",
     );
     expect(callbackCall).toBeDefined();
     expect(callbackCall!.init.method).toBe("POST");

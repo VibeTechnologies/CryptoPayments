@@ -5,8 +5,9 @@ import { resolveplan } from "../src/verify.js";
 //    chain-specific verification tests with mocked fetch/viem ──
 
 // vi.hoisted runs before vi.mock hoisting, so the ref is available in the factory
-const { mockGetTransactionReceipt } = vi.hoisted(() => ({
+const { mockGetTransactionReceipt, mockGetBlockNumber } = vi.hoisted(() => ({
   mockGetTransactionReceipt: vi.fn(),
+  mockGetBlockNumber: vi.fn(),
 }));
 
 vi.mock("viem", async (importOriginal) => {
@@ -15,13 +16,21 @@ vi.mock("viem", async (importOriginal) => {
     ...actual,
     createPublicClient: () => ({
       getTransactionReceipt: mockGetTransactionReceipt,
+      getBlockNumber: mockGetBlockNumber,
     }),
   };
 });
 
 describe("verifyEvmTransfer", () => {
+  beforeEach(() => {
+    // Default: return a block number far ahead so the confirmation gate
+    // passes for any reasonable blockNumber in the receipt.
+    mockGetBlockNumber.mockResolvedValue(1_000_000n);
+  });
+
   afterEach(() => {
     mockGetTransactionReceipt.mockReset();
+    mockGetBlockNumber.mockReset();
   });
 
   it("returns null for reverted transaction", async () => {
@@ -155,7 +164,9 @@ describe("verifyTonTransfer", () => {
 
   it("returns verified transfer for matching USDT jetton transfer", async () => {
     const mockFetch = vi.mocked(fetch);
-    const ourWallet = "EQTestWalletAddress";
+    // Use a realistic mixed-case TON base64 address to verify we do NOT lowercase
+    // (TON addresses are case-sensitive; lowercasing would corrupt them).
+    const ourWallet = "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs";
 
     // First call: /transactions
     mockFetch.mockResolvedValueOnce(
@@ -197,10 +208,10 @@ describe("verifyTonTransfer", () => {
     expect(result!.to).toBe(ourWallet);
   });
 
-  it("returns null when jetton API fails", async () => {
+  it("throws when jetton API fails (loud failure, not silent null)", async () => {
     const mockFetch = vi.mocked(fetch);
 
-    // First call: /transactions
+    // First call: /transactions — success
     mockFetch.mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -210,15 +221,14 @@ describe("verifyTonTransfer", () => {
       ),
     );
 
-    // Second call: /jetton/transfers fails
+    // Second call: /jetton/transfers — server error → must throw, not return null
     mockFetch.mockResolvedValueOnce(
       new Response("Internal Server Error", { status: 500 }),
     );
 
     const { verifyTonTransfer } = await import("../src/verify.js");
     const config = makeConfig();
-    const result = await verifyTonTransfer("tonhash", config);
-    expect(result).toBeNull();
+    await expect(verifyTonTransfer("tonhash", config)).rejects.toThrow("TON Jetton API error");
   });
 });
 

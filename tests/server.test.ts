@@ -279,7 +279,7 @@ describe("Server API", () => {
       expect(body.prices.starter).toBe(10);
       expect(body.prices.pro).toBe(25);
       expect(body.prices.max).toBe(100);
-      expect(body.chains).toEqual(["base", "eth", "ton", "sol", "base_sepolia", "eth_sepolia"]);
+      expect(body.chains).toEqual(["base", "eth", "arbitrum", "ton", "sol", "base_sepolia", "eth_sepolia"]);
     });
 
     it("returns wallet addresses for all chains", async () => {
@@ -903,7 +903,8 @@ describe("Server API", () => {
       const paymentId = created.payment.id;
 
       const res = await app.request(
-        `/api/payment/${paymentId}?api_key=test-api-key`,
+        `/api/payment/${paymentId}`,
+        { headers: { "x-api-key": "test-api-key" } },
       );
       expect(res.status).toBe(200);
       const body = await res.json();
@@ -913,13 +914,17 @@ describe("Server API", () => {
 
     it("returns 404 for non-existent payment", async () => {
       const res = await app.request(
-        "/api/payment/pi_nonexistent?api_key=test-api-key",
+        "/api/payment/pi_nonexistent",
+        { headers: { "x-api-key": "test-api-key" } },
       );
       expect(res.status).toBe(404);
     });
 
     it("returns 400 for invalid ID", async () => {
-      const res = await app.request("/api/payment/abc?api_key=test-api-key");
+      const res = await app.request(
+        "/api/payment/abc",
+        { headers: { "x-api-key": "test-api-key" } },
+      );
       expect(res.status).toBe(400);
     });
   });
@@ -933,7 +938,10 @@ describe("Server API", () => {
     });
 
     it("requires idtype and uid params", async () => {
-      const res = await app.request("/api/payments?api_key=test-api-key");
+      const res = await app.request(
+        "/api/payments",
+        { headers: { "x-api-key": "test-api-key" } },
+      );
       expect(res.status).toBe(400);
     });
 
@@ -963,7 +971,8 @@ describe("Server API", () => {
       });
 
       const res = await app.request(
-        "/api/payments?idtype=tg&uid=42&api_key=test-api-key",
+        "/api/payments?idtype=tg&uid=42",
+        { headers: { "x-api-key": "test-api-key" } },
       );
       expect(res.status).toBe(200);
       const body = await res.json();
@@ -1085,7 +1094,7 @@ describe("Server API", () => {
           uid: "42",
           plan: "starter",
           apiKey: "test-api-key",
-          callbackUrl: "https://bot.example.com/webhook",
+          callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
           topup: "medium",
           tenantType: "team",
           vmProvider: "hetzner",
@@ -1100,7 +1109,7 @@ describe("Server API", () => {
 
       // Find the callback fetch (not the /api/payment request itself)
       const callbackCall = fetchCalls.find(
-        (c) => c.url === "https://bot.example.com/webhook",
+        (c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook",
       );
       expect(callbackCall).toBeDefined();
       expect(callbackCall!.init.method).toBe("POST");
@@ -1161,7 +1170,7 @@ describe("Server API", () => {
           uid: "42",
           topup: "small",
           apiKey: "test-api-key",
-          callbackUrl: "https://bot.example.com/webhook",
+          callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
         }),
       });
 
@@ -1170,7 +1179,7 @@ describe("Server API", () => {
       await new Promise((r) => setTimeout(r, 100));
 
       const callbackCall = fetchCalls.find(
-        (c) => c.url === "https://bot.example.com/webhook",
+        (c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook",
       );
       expect(callbackCall).toBeDefined();
 
@@ -1208,14 +1217,14 @@ describe("Server API", () => {
           uid: "42",
           plan: "starter",
           apiKey: "test-api-key",
-          callbackUrl: "https://bot.example.com/webhook",
+          callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
         }),
       });
 
       await new Promise((r) => setTimeout(r, 100));
 
       const callbackCall = fetchCalls.find(
-        (c) => c.url === "https://bot.example.com/webhook",
+        (c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook",
       );
       expect(callbackCall).toBeDefined();
 
