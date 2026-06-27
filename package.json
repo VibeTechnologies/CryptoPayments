@@ -10,7 +10,8 @@
     "start": "node dist/server.js",
     "test": "vitest run",
     "predeploy:edge": "rm -rf supabase/functions/crypto-payments/src && cp -r src supabase/functions/crypto-payments/src",
-    "deploy:edge": "supabase functions deploy crypto-payments --no-verify-jwt"
+    "deploy:edge": "supabase functions deploy crypto-payments --no-verify-jwt",
+    "test:e2e:live": "bun tests/e2e-sepolia-live.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.14.1",
