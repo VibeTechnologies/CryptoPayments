@@ -6,7 +6,7 @@ export const API_BASE =
   // The old default ref (now deleted) is dead (empty /api/health).
   "https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments";
 
-export type ChainId = "base" | "eth" | "sol" | "ton" | "base_sepolia" | "eth_sepolia";
+export type ChainId = "base" | "eth" | "arbitrum" | "sol" | "ton" | "base_sepolia" | "eth_sepolia";
 export type TokenId = "usdc" | "usdt" | "ausd";
 
 export interface AppConfig {
@@ -51,6 +51,7 @@ export interface PaymentResult {
 export const CHAINS: { id: ChainId; name: string; icon: string; testnet?: boolean }[] = [
   { id: "base", name: "Base", icon: "🔵" },
   { id: "eth", name: "Ethereum", icon: "⟠" },
+  { id: "arbitrum", name: "Arbitrum One", icon: "🔷" },
   { id: "sol", name: "Solana", icon: "◎" },
   { id: "ton", name: "TON", icon: "💎" },
   { id: "base_sepolia", name: "Base Sepolia", icon: "🧪", testnet: true },
@@ -67,6 +68,7 @@ export const TOKENS: { id: TokenId; name: string }[] = [
 export const EVM_CHAIN_IDS: Record<string, string> = {
   base: "0x2105",
   eth: "0x1",
+  arbitrum: "0xa4b1",
   base_sepolia: "0x14a34",
   eth_sepolia: "0xaa36a7",
 };
@@ -82,6 +84,13 @@ export const EVM_CHAIN_PARAMS: Record<
     blockExplorerUrls: string[];
   }
 > = {
+  arbitrum: {
+    chainId: "0xa4b1",
+    chainName: "Arbitrum One",
+    rpcUrls: ["https://arb1.arbitrum.io/rpc"],
+    nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+    blockExplorerUrls: ["https://arbiscan.io"],
+  },
   base_sepolia: {
     chainId: "0x14a34",
     chainName: "Base Sepolia",
@@ -98,7 +107,7 @@ export const EVM_CHAIN_PARAMS: Record<
   },
 };
 
-export const EVM_CHAINS: ChainId[] = ["base", "eth", "base_sepolia", "eth_sepolia"];
+export const EVM_CHAINS: ChainId[] = ["base", "eth", "arbitrum", "base_sepolia", "eth_sepolia"];
 
 // ERC-20 transfer ABI
 export const ERC20_ABI = [

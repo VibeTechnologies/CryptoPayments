@@ -5,6 +5,7 @@ import type { ChainId, TokenId } from "@/lib/config";
 const CHAIN_NAMES: Record<ChainId, string> = {
   base: "Base",
   eth: "Ethereum",
+  arbitrum: "Arbitrum One",
   sol: "Solana",
   ton: "TON",
   base_sepolia: "Base Sepolia",
