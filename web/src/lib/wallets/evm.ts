@@ -59,6 +59,46 @@ export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; ad
   return { signer, address };
 }
 
+/**
+ * Connect an EVM wallet via WalletConnect v2 QR code (AppKit modal).
+ * Works with Coinbase Wallet mobile (WalletLink) and Rabby mobile (WC v2).
+ * On desktop: shows QR code + wallet list modal.
+ * On mobile: shows deep links into installed wallet apps.
+ */
+export async function connectEvmMobile(
+  chainId: ChainId,
+): Promise<{ signer: Signer; address: string }> {
+  const { appKit, getAppKitSigner } = await import("./appkit");
+
+  await appKit.open();
+
+  if (!appKit.getIsConnected()) {
+    throw new Error("Wallet connection cancelled");
+  }
+
+  const signer = await getAppKitSigner();
+  const address = await signer.getAddress();
+
+  // Request chain switch via the WalletConnect session
+  const targetChainId = EVM_CHAIN_IDS[chainId];
+  if (targetChainId) {
+    try {
+      const ethersProvider = signer.provider as import("ethers").BrowserProvider;
+      await ethersProvider.send("wallet_switchEthereumChain", [{ chainId: targetChainId }]);
+    } catch (err: unknown) {
+      if (isChainNotAddedError(err)) {
+        const chainParams = EVM_CHAIN_PARAMS[chainId];
+        if (chainParams) {
+          const ethersProvider = signer.provider as import("ethers").BrowserProvider;
+          await ethersProvider.send("wallet_addEthereumChain", [chainParams]);
+        }
+      }
+    }
+  }
+
+  return { signer, address };
+}
+
 export async function sendEvmTransfer(
   signer: Signer,
   tokenAddress: string,
