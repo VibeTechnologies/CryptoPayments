@@ -8,6 +8,7 @@ import type { StatusType } from "@/components/status-message";
 vi.mock("@/lib/wallets/evm", () => ({
   isEvmAvailable: vi.fn(() => false),
   connectEvm: vi.fn(),
+  connectEvmMobile: vi.fn(),
   sendEvmTransfer: vi.fn(),
 }));
 
@@ -25,6 +26,11 @@ vi.mock("@/lib/wallets/ton", () => ({
   })),
 }));
 
+vi.mock("@/lib/wallets/appkit", () => ({
+  appKit: { open: vi.fn(), getIsConnected: vi.fn(() => true) },
+  getAppKitSigner: vi.fn(),
+}));
+
 // Mock TonConnect hooks
 const mockOpenModal = vi.fn();
 const mockSendTransaction = vi.fn();
@@ -39,7 +45,7 @@ vi.mock("@tonconnect/ui-react", () => ({
   TonConnectUIProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
-import { isEvmAvailable, connectEvm, sendEvmTransfer } from "@/lib/wallets/evm";
+import { isEvmAvailable, connectEvm, connectEvmMobile, sendEvmTransfer } from "@/lib/wallets/evm";
 import { isSolanaAvailable, connectSolana, sendSolanaTransfer } from "@/lib/wallets/solana";
 import { buildTonTransferMessage } from "@/lib/wallets/ton";
 
@@ -68,23 +74,23 @@ describe("WalletConnect", () => {
   it("shows install prompt when EVM wallet is not detected", () => {
     vi.mocked(isEvmAvailable).mockReturnValue(false);
     render(<WalletConnect {...defaultProps} chain="base" />);
-    expect(screen.getByText(/EVM wallet not detected/i)).toBeInTheDocument();
+    expect(screen.getByText(/No extension detected/i)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Install EVM wallet/i })).toHaveAttribute(
       "href",
       "https://metamask.io/download/",
     );
   });
 
-  it("opens install page when clicking connect without extension", async () => {
+  it("opens install page when clicking connect without Phantom extension", async () => {
     const user = userEvent.setup();
-    vi.mocked(isEvmAvailable).mockReturnValue(false);
+    vi.mocked(isSolanaAvailable).mockReturnValue(false);
     const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
 
-    render(<WalletConnect {...defaultProps} chain="base" />);
-    await user.click(screen.getByText("Connect Wallet"));
+    render(<WalletConnect {...defaultProps} chain="sol" />);
+    await user.click(screen.getByText("Connect Phantom"));
 
     expect(openSpy).toHaveBeenCalledWith(
-      "https://metamask.io/download/",
+      "https://phantom.app/download",
       "_blank",
       "noopener,noreferrer",
     );
@@ -364,5 +370,69 @@ describe("WalletConnect", () => {
 
     await user.click(screen.getByText("Pay $10.00 USDC"));
     expect(onStatus).toHaveBeenCalledWith("error", "Transaction cancelled");
+  });
+
+  // --- Mobile wallet (AppKit / WalletConnect) tests ---
+
+  it("renders 'Connect Mobile Wallet' button for EVM chain (base)", () => {
+    render(<WalletConnect {...defaultProps} chain="base" />);
+    expect(screen.getByText("Connect Mobile Wallet")).toBeInTheDocument();
+  });
+
+  it("renders 'Connect Mobile Wallet' button for EVM chain (eth)", () => {
+    render(<WalletConnect {...defaultProps} chain="eth" />);
+    expect(screen.getByText("Connect Mobile Wallet")).toBeInTheDocument();
+  });
+
+  it("does NOT render 'Connect Mobile Wallet' for Solana", () => {
+    render(<WalletConnect {...defaultProps} chain="sol" />);
+    expect(screen.queryByText("Connect Mobile Wallet")).not.toBeInTheDocument();
+  });
+
+  it("does NOT render 'Connect Mobile Wallet' for TON", () => {
+    render(<WalletConnect {...defaultProps} chain="ton" />);
+    expect(screen.queryByText("Connect Mobile Wallet")).not.toBeInTheDocument();
+  });
+
+  it("clicking 'Connect Mobile Wallet' calls connectEvmMobile with chain", async () => {
+    const user = userEvent.setup();
+    vi.mocked(connectEvmMobile).mockResolvedValue({ signer: {} as any, address: "0xMobileAddr" });
+
+    render(<WalletConnect {...defaultProps} chain="base" />);
+    await user.click(screen.getByText("Connect Mobile Wallet"));
+
+    expect(connectEvmMobile).toHaveBeenCalledWith("base");
+  });
+
+  it("after mobile connect, shows connected address and Pay button", async () => {
+    const user = userEvent.setup();
+    vi.mocked(connectEvmMobile).mockResolvedValue({
+      signer: {} as any,
+      address: "0x1234567890abcdef1234567890abcdef12345678",
+    });
+
+    render(<WalletConnect {...defaultProps} chain="base" />);
+    await user.click(screen.getByText("Connect Mobile Wallet"));
+
+    expect(screen.getByText(/0x1234/)).toBeInTheDocument();
+    expect(screen.getByText("Pay $10.00 USDC")).toBeInTheDocument();
+  });
+
+  it("'Connect Wallet' (extension) still present when window.ethereum exists", () => {
+    vi.mocked(isEvmAvailable).mockReturnValue(true);
+    render(<WalletConnect {...defaultProps} chain="base" />);
+    expect(screen.getByText("Connect Wallet")).toBeInTheDocument();
+    expect(screen.getByText("Connect Mobile Wallet")).toBeInTheDocument();
+  });
+
+  it("shows error when mobile connect is cancelled", async () => {
+    const user = userEvent.setup();
+    vi.mocked(connectEvmMobile).mockRejectedValue(new Error("Wallet connection cancelled"));
+
+    const onStatus = vi.fn();
+    render(<WalletConnect {...defaultProps} chain="base" onStatus={onStatus} />);
+    await user.click(screen.getByText("Connect Mobile Wallet"));
+
+    expect(onStatus).toHaveBeenCalledWith("error", "Wallet connection cancelled");
   });
 });
