@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { connectEvm, connectEvmWalletConnect, isEvmAvailable } from "@/lib/wallets/evm";
+import { connectEvm, connectEvmWalletConnect, connectEvmCoinbase, isEvmAvailable } from "@/lib/wallets/evm";
 
 // Mock ethers.js
 const mockSend = vi.fn();
@@ -170,5 +170,34 @@ describe("connectEvmWalletConnect", () => {
     expect(mockProviderSend).toHaveBeenCalledWith("wallet_switchEthereumChain", [
       { chainId: "0x2105" },
     ]);
+  });
+});
+
+describe("connectEvmCoinbase", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSend.mockResolvedValue(undefined);
+  });
+
+  it("uses injected window.ethereum when isCoinbaseWallet is true (in-app browser)", async () => {
+    (window as any).ethereum = { isCoinbaseWallet: true, request: vi.fn() };
+    const result = await connectEvmCoinbase("base");
+    // Should have used BrowserProvider with the injected ethereum (same as connectEvm)
+    expect(mockSend).toHaveBeenCalledWith("eth_requestAccounts", []);
+    expect(result.address).toBe("0xAbCdEf0123456789AbCdEf0123456789AbCdEf01");
+  });
+
+  it("does NOT use injected ethereum when isCoinbaseWallet is false (desktop)", async () => {
+    (window as any).ethereum = { isCoinbaseWallet: false, request: vi.fn() };
+    // SDK path — @coinbase/wallet-sdk is not mocked here so it would throw.
+    // Just confirm it doesn't call BrowserProvider.send (which is the connectEvm path).
+    vi.clearAllMocks();
+    try {
+      await connectEvmCoinbase("base");
+    } catch {
+      // expected — SDK not available in test env
+    }
+    // connectEvm path was NOT taken
+    expect(mockSend).not.toHaveBeenCalledWith("eth_requestAccounts", []);
   });
 });

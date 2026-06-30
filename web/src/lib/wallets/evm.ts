@@ -7,11 +7,18 @@ import { ERC20_ABI, EVM_CHAIN_IDS, EVM_CHAIN_PARAMS, type ChainId } from "../con
 // to avoid a TS "Subsequent property declarations" conflict. We cast at point of use.
 type EthereumProvider = {
   isMetaMask?: boolean;
+  isCoinbaseWallet?: boolean;
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
 };
 function getEthereum(): EthereumProvider | undefined {
   if (typeof window === "undefined") return undefined;
   return (window as unknown as { ethereum?: EthereumProvider }).ethereum;
+}
+
+/** True when the page is running inside the Coinbase Wallet / Base in-app browser. */
+function isInCoinbaseApp(): boolean {
+  const eth = getEthereum();
+  return !!eth && !!(eth as { isCoinbaseWallet?: boolean }).isCoinbaseWallet;
 }
 
 export function isEvmAvailable(): boolean {
@@ -65,12 +72,20 @@ export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; ad
 
 /**
  * Connect via Coinbase Wallet (Base network official wallet).
- * Uses @coinbase/wallet-sdk directly with eoaOnly — shows Coinbase's
- * own QR popup immediately, no AppKit picker in the way.
+ *
+ * - If already inside the Coinbase/Base in-app browser (isCoinbaseWallet injected),
+ *   use window.ethereum directly — no QR needed, wallet is right there.
+ * - Otherwise (desktop browser): use @coinbase/wallet-sdk with eoaOnly to show
+ *   Coinbase's own QR popup for mobile scan.
  */
 export async function connectEvmCoinbase(
   chainId: ChainId,
 ): Promise<{ signer: Signer; address: string }> {
+  // Already inside Coinbase Wallet / Base app — use the injected provider directly.
+  if (isInCoinbaseApp()) {
+    return connectEvm(chainId);
+  }
+
   const appUrl =
     process.env.NEXT_PUBLIC_APP_URL ??
     (typeof window !== "undefined" ? window.location.origin : "https://pay.agentlabs.cc");
@@ -83,7 +98,7 @@ export async function connectEvmCoinbase(
   });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cbProvider = sdk.makeWeb3Provider({ options: "eoaOnly" }) as any;
-  // This triggers the Coinbase Wallet SDK's native QR popup directly
+  // Triggers Coinbase Wallet SDK's native QR popup — opens keys.coinbase.com
   const accounts = (await cbProvider.request({ method: "eth_requestAccounts" })) as string[];
 
   const provider = new BrowserProvider(cbProvider);
