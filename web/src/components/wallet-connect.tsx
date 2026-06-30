@@ -188,16 +188,16 @@ export function WalletConnect({
       {/* Connect buttons — shown when not yet connected */}
       {!connectedAddress && (
         <>
-          {/* EVM: 3 icon-only connect buttons in a row */}
+          {/* EVM: 3 icon-only connect buttons in a row, centered */}
           {isEvm && (
-            <div className="flex gap-2">
+            <div className="flex justify-center gap-3">
               <button
                 onClick={handleConnect}
                 disabled={disabled}
                 title="Connect browser wallet"
                 className={`
-                  flex items-center justify-center rounded-lg p-3
-                  bg-[#3b82f6] hover:bg-[#2563eb] text-white transition-all duration-150
+                  flex items-center justify-center rounded-xl p-3
+                  bg-neutral-100 hover:bg-neutral-200 text-neutral-600 transition-all duration-150
                   ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
                 `}
               >
@@ -209,8 +209,8 @@ export function WalletConnect({
                 disabled={disabled}
                 title="Connect Base wallet"
                 className={`
-                  flex items-center justify-center rounded-lg p-3
-                  bg-[#0052FF] hover:bg-[#0040cc] text-white transition-all duration-150
+                  flex items-center justify-center rounded-xl p-3
+                  bg-neutral-100 hover:bg-neutral-200 text-neutral-600 transition-all duration-150
                   ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
                 `}
               >
@@ -222,8 +222,8 @@ export function WalletConnect({
                 disabled={disabled}
                 title="Connect WalletConnect"
                 className={`
-                  flex items-center justify-center rounded-lg p-3
-                  bg-[#3B99FC] hover:bg-[#2a88eb] text-white transition-all duration-150
+                  flex items-center justify-center rounded-xl p-3
+                  bg-neutral-100 hover:bg-neutral-200 text-neutral-600 transition-all duration-150
                   ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
                 `}
               >
