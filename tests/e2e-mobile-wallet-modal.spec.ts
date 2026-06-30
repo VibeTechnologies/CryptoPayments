@@ -79,7 +79,7 @@ test.describe("Mobile Wallet QR Connect", () => {
   // Regression: Coinbase Wallet mobile "no valid asset found"
   test("compiled bundle has eoaOnly coinbasePreference and no hardcoded wrong domain", async ({ page }) => {
     await page.goto("/pay?plan=starter&uid=123456&idtype=tg&test=true");
-    await page.waitForSelector('button:has-text("Connect Base wallet")', { timeout: 10_000 });
+    await page.waitForSelector('button[title="Connect Base wallet"]', { timeout: 10_000 });
 
     const result = await page.evaluate(async () => {
       const scriptSrcs = Array.from(document.querySelectorAll("script[src]"))
