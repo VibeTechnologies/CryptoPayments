@@ -1,9 +1,11 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { SiCoinbase, SiWalletconnect } from "react-icons/si";
+import { TbBrowserPlus } from "react-icons/tb";
 import type { ChainId, TokenId } from "@/lib/config";
 import { EVM_CHAINS } from "@/lib/config";
-import { isEvmAvailable, connectEvm, connectEvmMobile, sendEvmTransfer } from "@/lib/wallets/evm";
+import { isEvmAvailable, connectEvm, connectEvmMobile, connectEvmWalletConnect, sendEvmTransfer } from "@/lib/wallets/evm";
 import { isSolanaAvailable, connectSolana, sendSolanaTransfer } from "@/lib/wallets/solana";
 import { buildTonTransferMessage } from "@/lib/wallets/ton";
 import { useTonConnectUI, useTonAddress } from "@tonconnect/ui-react";
@@ -136,6 +138,17 @@ export function WalletConnect({
     }
   }
 
+  async function handleConnectWalletConnect() {
+    try {
+      const { signer, address } = await connectEvmWalletConnect(chain);
+      setEvmSigner(signer);
+      setConnectedAddress(address);
+      onStatus("pending", `Connected: ${address.slice(0, 6)}...${address.slice(-4)}`);
+    } catch (err) {
+      onStatus("error", friendlyError(err));
+    }
+  }
+
   async function handleSend() {
     setSending(true);
     onStatus("pending", "Confirm the transaction in your wallet...");
@@ -175,36 +188,77 @@ export function WalletConnect({
       {/* Connect buttons — shown when not yet connected */}
       {!connectedAddress && (
         <>
-          {/* Primary connect button */}
-          <button
-            onClick={handleConnect}
-            disabled={disabled}
-            className={`
-              w-full rounded-lg px-4 py-3 text-sm font-semibold
-              transition-all duration-150
-              ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
-              ${isEvm ? "bg-[#3b82f6] hover:bg-[#2563eb] text-white" : ""}
-              ${isSol ? "bg-[#ab9ff2] hover:bg-[#9b8fe2] text-black" : ""}
-              ${isTon ? "bg-[#0098ea] hover:bg-[#0088d0] text-white" : ""}
-            `}
-          >
-            {isEvm && "Connect Wallet"}
-            {isSol && "Connect Phantom"}
-            {isTon && "Connect TON Wallet"}
-          </button>
-
-          {/* Mobile QR connect — EVM only (Coinbase Wallet / Rabby mobile via WalletConnect) */}
+          {/* EVM: 3 explicit connect options */}
           {isEvm && (
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={handleConnect}
+                disabled={disabled}
+                className={`
+                  w-full flex items-center gap-3 rounded-lg px-4 py-3 text-sm font-semibold
+                  bg-[#3b82f6] hover:bg-[#2563eb] text-white transition-all duration-150
+                  ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
+                `}
+              >
+                <TbBrowserPlus size={20} />
+                Connect browser wallet
+              </button>
+
+              <button
+                onClick={handleConnectMobile}
+                disabled={disabled}
+                className={`
+                  w-full flex items-center gap-3 rounded-lg px-4 py-3 text-sm font-semibold
+                  bg-[#0052FF] hover:bg-[#0040cc] text-white transition-all duration-150
+                  ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
+                `}
+              >
+                <SiCoinbase size={18} />
+                Connect Base wallet
+              </button>
+
+              <button
+                onClick={handleConnectWalletConnect}
+                disabled={disabled}
+                className={`
+                  w-full flex items-center gap-3 rounded-lg px-4 py-3 text-sm font-semibold
+                  bg-[#3B99FC] hover:bg-[#2a88eb] text-white transition-all duration-150
+                  ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
+                `}
+              >
+                <SiWalletconnect size={18} />
+                Connect WalletConnect
+              </button>
+            </div>
+          )}
+
+          {/* Solana */}
+          {isSol && (
             <button
-              onClick={handleConnectMobile}
+              onClick={handleConnect}
               disabled={disabled}
               className={`
-                w-full rounded-lg border border-[#3b82f6]/40 px-4 py-3 text-sm font-semibold
-                text-[#3b82f6] transition-all duration-150
-                ${disabled ? "opacity-50 cursor-not-allowed" : "hover:bg-[#3b82f6]/10 cursor-pointer"}
+                w-full rounded-lg px-4 py-3 text-sm font-semibold
+                bg-[#ab9ff2] hover:bg-[#9b8fe2] text-black transition-all duration-150
+                ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
               `}
             >
-              Connect Mobile Wallet
+              Connect Phantom
+            </button>
+          )}
+
+          {/* TON */}
+          {isTon && (
+            <button
+              onClick={handleConnect}
+              disabled={disabled}
+              className={`
+                w-full rounded-lg px-4 py-3 text-sm font-semibold
+                bg-[#0098ea] hover:bg-[#0088d0] text-white transition-all duration-150
+                ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
+              `}
+            >
+              Connect TON Wallet
             </button>
           )}
 
@@ -220,22 +274,6 @@ export function WalletConnect({
               >
                 Install {walletInfo.name}
               </a>
-            </p>
-          )}
-
-          {/* EVM: show install hint only if no extension AND user hasn't opened mobile modal yet */}
-          {isEvm && !hasEvmWallet && (
-            <p className="text-xs text-muted text-center">
-              No extension detected.{" "}
-              <a
-                href={INSTALL_URLS.evm.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-accent underline hover:text-accent-hover"
-              >
-                Install EVM wallet
-              </a>
-              {" "}or use "Connect Mobile Wallet" above.
             </p>
           )}
         </>

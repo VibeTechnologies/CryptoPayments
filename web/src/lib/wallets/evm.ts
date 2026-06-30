@@ -72,12 +72,28 @@ export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; ad
 export async function connectEvmMobile(
   chainId: ChainId,
 ): Promise<{ signer: Signer; address: string }> {
+  return connectEvmAppKit(chainId, "AllWallets");
+}
+
+/**
+ * Connect via WalletConnect v2 QR directly (skips wallet list, shows QR immediately).
+ */
+export async function connectEvmWalletConnect(
+  chainId: ChainId,
+): Promise<{ signer: Signer; address: string }> {
+  return connectEvmAppKit(chainId, "ConnectingWalletConnectBasic");
+}
+
+async function connectEvmAppKit(
+  chainId: ChainId,
+  view: "AllWallets" | "ConnectingWalletConnectBasic",
+): Promise<{ signer: Signer; address: string }> {
   const { openAndWaitForConnection, getAppKitSigner } = await import("./appkit");
 
   // openAndWaitForConnection subscribes to state BEFORE opening the modal,
   // then resolves when the modal closes with a connected session, or rejects
   // with "Wallet connection cancelled" if the user dismisses without connecting.
-  await openAndWaitForConnection();
+  await openAndWaitForConnection(view);
 
   const signer = await getAppKitSigner();
   const address = await signer.getAddress();
