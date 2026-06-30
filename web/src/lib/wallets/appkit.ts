@@ -78,7 +78,7 @@ export async function getAppKitSigner() {
  * If the modal closes with a connected session, the promise resolves.
  * If the modal closes without a connection (user cancelled), it rejects.
  */
-export function openAndWaitForConnection(): Promise<void> {
+export function openAndWaitForConnection(view?: "ConnectingWalletConnectBasic" | "AllWallets" | "Connect"): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     // Declare unsub as let so synchronous subscribeState callbacks (e.g. in tests)
     // can safely call unsub?.() before the assignment completes without TDZ crash.
@@ -94,7 +94,7 @@ export function openAndWaitForConnection(): Promise<void> {
         }
       }
     });
-    appKit.open().catch((err) => {
+    appKit.open(view ? { view } : undefined).catch((err) => {
       unsub?.();
       reject(err);
     });
