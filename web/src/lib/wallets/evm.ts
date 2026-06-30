@@ -76,6 +76,16 @@ export async function connectEvmMobile(
 }
 
 /**
+ * Connect via Coinbase Wallet (Base network official wallet).
+ * Opens AppKit Connect view with Coinbase Wallet as a featured option.
+ */
+export async function connectEvmCoinbase(
+  chainId: ChainId,
+): Promise<{ signer: Signer; address: string }> {
+  return connectEvmAppKit(chainId, "Connect");
+}
+
+/**
  * Connect via WalletConnect v2 QR directly (skips wallet list, shows QR immediately).
  */
 export async function connectEvmWalletConnect(
@@ -86,7 +96,7 @@ export async function connectEvmWalletConnect(
 
 async function connectEvmAppKit(
   chainId: ChainId,
-  view: "AllWallets" | "ConnectingWalletConnectBasic",
+  view: "AllWallets" | "ConnectingWalletConnectBasic" | "Connect",
 ): Promise<{ signer: Signer; address: string }> {
   const { openAndWaitForConnection, getAppKitSigner } = await import("./appkit");
 

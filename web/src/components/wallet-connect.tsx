@@ -1,11 +1,11 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { SiCoinbase, SiWalletconnect } from "react-icons/si";
+import { SiWalletconnect } from "react-icons/si";
 import { TbBrowserPlus } from "react-icons/tb";
 import type { ChainId, TokenId } from "@/lib/config";
 import { EVM_CHAINS } from "@/lib/config";
-import { isEvmAvailable, connectEvm, connectEvmMobile, connectEvmWalletConnect, sendEvmTransfer } from "@/lib/wallets/evm";
+import { isEvmAvailable, connectEvm, connectEvmCoinbase, connectEvmWalletConnect, sendEvmTransfer } from "@/lib/wallets/evm";
 import { isSolanaAvailable, connectSolana, sendSolanaTransfer } from "@/lib/wallets/solana";
 import { buildTonTransferMessage } from "@/lib/wallets/ton";
 import { useTonConnectUI, useTonAddress } from "@tonconnect/ui-react";
@@ -127,9 +127,9 @@ export function WalletConnect({
     }
   }
 
-  async function handleConnectMobile() {
+  async function handleConnectCoinbase() {
     try {
-      const { signer, address } = await connectEvmMobile(chain);
+      const { signer, address } = await connectEvmCoinbase(chain);
       setEvmSigner(signer);
       setConnectedAddress(address);
       onStatus("pending", `Connected: ${address.slice(0, 6)}...${address.slice(-4)}`);
@@ -205,7 +205,7 @@ export function WalletConnect({
               </button>
 
               <button
-                onClick={handleConnectMobile}
+                onClick={handleConnectCoinbase}
                 disabled={disabled}
                 title="Connect Base wallet"
                 className={`
@@ -214,7 +214,13 @@ export function WalletConnect({
                   ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
                 `}
               >
-                <SiCoinbase size={20} />
+                {/* Official Base network logo — https://github.com/base-org/brand-kit */}
+                <img
+                  src="https://raw.githubusercontent.com/base-org/brand-kit/001c0e9b40a67799ebe0418671ac4e02a0c683ce/logo/in-product/Base_Network_Logo.svg"
+                  alt="Base"
+                  width={20}
+                  height={20}
+                />
               </button>
 
               <button

@@ -40,8 +40,8 @@ test.describe("Mobile Wallet QR Connect", () => {
 
   test("Rabby configured as featured wallet in compiled bundle", async ({ page }) => {
     await page.goto("/pay?plan=starter&uid=123456&idtype=tg&test=true");
-    await page.waitForSelector('button:has-text("Connect Base wallet")', { timeout: 10_000 });
-    await page.locator('button:has-text("Connect Base wallet")').click();
+    await page.waitForSelector('button[title="Connect Base wallet"]', { timeout: 10_000 });
+    await page.locator('button[title="Connect Base wallet"]').click();
 
     await page.locator("appkit-modal, wui-modal, w3m-modal").first().waitFor({
       state: "attached",
