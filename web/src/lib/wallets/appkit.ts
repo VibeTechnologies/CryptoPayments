@@ -68,10 +68,13 @@ export async function getAppKitSigner() {
  */
 export function openAndWaitForConnection(): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    // Declare unsub as let so synchronous subscribeState callbacks (e.g. in tests)
+    // can safely call unsub?.() before the assignment completes without TDZ crash.
+    let unsub: (() => void) | undefined;
     // Subscribe BEFORE open() so we never miss the close event
-    const unsub = appKit.subscribeState((state) => {
+    unsub = appKit.subscribeState((state) => {
       if (!state.open) {
-        unsub();
+        unsub?.(); // no-op if called synchronously before assignment completes
         if (appKit.getIsConnectedState()) {
           resolve();
         } else {
@@ -80,7 +83,7 @@ export function openAndWaitForConnection(): Promise<void> {
       }
     });
     appKit.open().catch((err) => {
-      unsub();
+      unsub?.();
       reject(err);
     });
   });
