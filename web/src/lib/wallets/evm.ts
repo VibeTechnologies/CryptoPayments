@@ -65,17 +65,45 @@ export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; ad
 
 /**
  * Connect via Coinbase Wallet (Base network official wallet).
- * Opens AppKit ConnectingExternal view directly for the coinbaseWallet connector —
- * bypasses the picker and goes straight to the Coinbase Wallet QR/deeplink flow.
+ * Uses @coinbase/wallet-sdk directly with eoaOnly — shows Coinbase's
+ * own QR popup immediately, no AppKit picker in the way.
  */
 export async function connectEvmCoinbase(
   chainId: ChainId,
 ): Promise<{ signer: Signer; address: string }> {
-  return connectEvmAppKit(chainId, "ConnectingExternal", {
-    id: "coinbaseWallet",
-    type: "EXTERNAL" as const,
-    name: "Coinbase Wallet",
+  const appUrl =
+    process.env.NEXT_PUBLIC_APP_URL ??
+    (typeof window !== "undefined" ? window.location.origin : "https://pay.agentlabs.cc");
+
+  const { CoinbaseWalletSDK } = await import("@coinbase/wallet-sdk");
+  const sdk = new CoinbaseWalletSDK({
+    appName: "OpenClawBox Payments",
+    appLogoUrl: `${appUrl}/globe.svg`,
+    appChainIds: [8453], // Base mainnet
   });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cbProvider = sdk.makeWeb3Provider({ options: "eoaOnly" }) as any;
+  // This triggers the Coinbase Wallet SDK's native QR popup directly
+  const accounts = (await cbProvider.request({ method: "eth_requestAccounts" })) as string[];
+
+  const provider = new BrowserProvider(cbProvider);
+
+  const targetChainId = EVM_CHAIN_IDS[chainId];
+  if (targetChainId) {
+    try {
+      await provider.send("wallet_switchEthereumChain", [{ chainId: targetChainId }]);
+    } catch (err: unknown) {
+      if (isChainNotAddedError(err)) {
+        const chainParams = EVM_CHAIN_PARAMS[chainId];
+        if (chainParams) await provider.send("wallet_addEthereumChain", [chainParams]);
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  const signer = await provider.getSigner();
+  return { signer, address: accounts[0] };
 }
 
 /**
@@ -89,12 +117,11 @@ export async function connectEvmWalletConnect(
 
 async function connectEvmAppKit(
   chainId: ChainId,
-  view: "AllWallets" | "ConnectingWalletConnectBasic" | "Connect" | "ConnectingExternal",
-  connector?: Record<string, unknown>,
+  view: "AllWallets" | "ConnectingWalletConnectBasic" | "Connect",
 ): Promise<{ signer: Signer; address: string }> {
   const { openAndWaitForConnection, getAppKitSigner } = await import("./appkit");
 
-  await openAndWaitForConnection(view, connector);
+  await openAndWaitForConnection(view);
 
   const signer = await getAppKitSigner();
   const address = await signer.getAddress();

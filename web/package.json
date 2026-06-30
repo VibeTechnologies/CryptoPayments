@@ -11,6 +11,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@coinbase/wallet-sdk": "^4.3.6",
     "@reown/appkit": "1.8.21",
     "@reown/appkit-adapter-ethers": "1.8.21",
     "@solana/spl-token": "~0.4.14",

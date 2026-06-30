@@ -78,12 +78,10 @@ export async function getAppKitSigner() {
  * If the modal closes with a connected session, the promise resolves.
  * If the modal closes without a connection (user cancelled), it rejects.
  */
-type AppKitView = "ConnectingWalletConnectBasic" | "AllWallets" | "Connect" | "ConnectingExternal";
+type AppKitView = "ConnectingWalletConnectBasic" | "AllWallets" | "Connect";
 
 export function openAndWaitForConnection(
   view?: AppKitView,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  connector?: Record<string, unknown>,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let unsub: (() => void) | undefined;
@@ -97,10 +95,7 @@ export function openAndWaitForConnection(
         }
       }
     });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const opts: any = view ? { view } : undefined;
-    if (opts && connector) opts.connector = connector;
-    appKit.open(opts).catch((err) => {
+    appKit.open(view ? { view } : undefined).catch((err) => {
       unsub?.();
       reject(err);
     });
