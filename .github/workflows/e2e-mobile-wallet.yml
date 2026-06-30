@@ -36,6 +36,9 @@ jobs:
           node-version: "22"
           cache: pnpm
 
+      - name: Install root dependencies (includes Playwright)
+        run: pnpm install --frozen-lockfile
+
       - name: Install web dependencies
         run: pnpm install --frozen-lockfile
         working-directory: web
@@ -55,5 +58,5 @@ jobs:
           NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: ${{ secrets.REOWN_PROJECT_ID }}
         run: |
           npx serve web/out -p 3000 &
-          sleep 2
-          node_modules/.bin/playwright test tests/e2e-mobile-wallet-modal.spec.ts --reporter=list
+          sleep 3
+          npx playwright test tests/e2e-mobile-wallet-modal.spec.ts --reporter=list
