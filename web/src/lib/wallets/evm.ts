@@ -34,7 +34,8 @@ export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; ad
   const eth = getEthereum();
   if (!eth) throw new Error("No EVM wallet detected");
 
-  const provider = new BrowserProvider(eth as Parameters<typeof BrowserProvider>[0]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const provider = new BrowserProvider(eth as any);
   await provider.send("eth_requestAccounts", []);
 
   // Switch to correct chain
