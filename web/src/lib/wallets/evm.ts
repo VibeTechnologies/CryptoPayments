@@ -3,17 +3,19 @@
 import { BrowserProvider, Contract, parseUnits, type Signer } from "ethers";
 import { ERC20_ABI, EVM_CHAIN_IDS, EVM_CHAIN_PARAMS, type ChainId } from "../config";
 
-declare global {
-  interface Window {
-    ethereum?: {
-      isMetaMask?: boolean;
-      request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
-    };
-  }
+// @reown/appkit augments Window.ethereum as Record<string,unknown>; match that
+// to avoid a TS "Subsequent property declarations" conflict. We cast at point of use.
+type EthereumProvider = {
+  isMetaMask?: boolean;
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+};
+function getEthereum(): EthereumProvider | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (window as unknown as { ethereum?: EthereumProvider }).ethereum;
 }
 
 export function isEvmAvailable(): boolean {
-  return typeof window !== "undefined" && !!window.ethereum;
+  return typeof window !== "undefined" && !!getEthereum();
 }
 
 /** Check if a wallet error is "chain not recognized" (code 4902).
@@ -29,9 +31,10 @@ function isChainNotAddedError(err: unknown): boolean {
 }
 
 export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; address: string }> {
-  if (!window.ethereum) throw new Error("No EVM wallet detected");
+  const eth = getEthereum();
+  if (!eth) throw new Error("No EVM wallet detected");
 
-  const provider = new BrowserProvider(window.ethereum);
+  const provider = new BrowserProvider(eth as Parameters<typeof BrowserProvider>[0]);
   await provider.send("eth_requestAccounts", []);
 
   // Switch to correct chain
