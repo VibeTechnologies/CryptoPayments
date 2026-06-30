@@ -108,8 +108,8 @@ test('telegram /topup flow: checkout URL → mock wallet → real edge → Payme
     uid: TEST_UID, topup: TEST_TOPUP, test: 'true', idtype: 'tg',
     callback: CALLBACK_URL, amountUsd: AMOUNT_USD, exp: String(exp), sig,
   });
-  // Bot uses pay.vibebrowser.app as its cryptoPaymentsUrl base (confirmed from live pod config)
-  const payUrl = `https://pay.vibebrowser.app/pay?${qs}`;
+  // Bot uses pay.agentlabs.cc as its cryptoPaymentsUrl base (confirmed from live pod config)
+  const payUrl = `https://pay.agentlabs.cc/pay?${qs}`;
   console.log(`[test] Telegram checkout URL: ${payUrl}`);
 
   // sig must be 64-char hex from HMAC-SHA256

@@ -91,10 +91,10 @@ export function loadConfig(): Config {
     checkoutSecret: env("CHECKOUT_SECRET", env("CALLBACK_SECRET")),
     baseUrl: env("BASE_URL", "https://pay.openclaw.ai"),
     // Sourced from docs/DEPLOY-eth-sepolia-topup.md: admin.openclaw.vibebrowser.app is the
-    // OpenClawBot webhook receiver; pay.vibebrowser.app is the payment-service domain.
+    // OpenClawBot webhook receiver; pay.agentlabs.cc is the payment-service domain.
     callbackAllowlist: env(
       "CALLBACK_URL_ALLOWLIST",
-      "admin.openclaw.vibebrowser.app,pay.vibebrowser.app",
+      "admin.openclaw.vibebrowser.app,pay.agentlabs.cc",
     ).split(",").map((s) => s.trim()).filter(Boolean),
   };
 }

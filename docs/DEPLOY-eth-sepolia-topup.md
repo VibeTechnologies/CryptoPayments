@@ -11,7 +11,7 @@ Ethereum Sepolia) to prod, then proves it end-to-end.
 - Test wallet (holds 10k aUSD): `0x64cd33D639Cbb0b461c64ec989a7d9789d701a30` (key: Bitwarden "agentUSD testnet wallet").
 
 ## Deploy targets (from recon)
-- **CryptoPayments API** = Supabase Edge Function, project ref `krjbwbvmrpazdmmjstzo`, fronted by `pay.vibebrowser.app`. Deploy: `pnpm predeploy:edge && pnpm deploy:edge`.
+- **CryptoPayments API** = Supabase Edge Function, project ref `krjbwbvmrpazdmmjstzo`, fronted by `pay.agentlabs.cc`. Deploy: `pnpm predeploy:edge && pnpm deploy:edge`.
 - **DB migrations** = manual `supabase db push` to the same project (no CI path).
 - **SPA** = Next.js static → Azure SWA via `.github/workflows/pay-deploy.yml` (auto on `web/**` to main).
 - **OpenClawBot** = AKS (kubectl ctx `openclaw-aks`), CI deploys on merge to main. Webhook receiver `/crypto/webhook`, HMAC headers `X-Signature` + `X-Timestamp`, secret `CRYPTO_CALLBACK_SECRET`.
@@ -45,7 +45,7 @@ Plus the DB password for `supabase link --project-ref krjbwbvmrpazdmmjstzo`.
    supabase secrets set --project-ref $R \
      WALLET_ETH_SEPOLIA=0xF08E2a9D128827615Fca921f278b7bFCBac895E2 \
      RPC_ETH_SEPOLIA=https://ethereum-sepolia-rpc.publicnode.com \
-     BASE_URL=https://pay.vibebrowser.app
+     BASE_URL=https://pay.agentlabs.cc
    ```
    Confirm existing `CALLBACK_SECRET` == OpenClawBot `CRYPTO_CALLBACK_SECRET`, and `API_KEY` == bot `CRYPTO_PAYMENTS_API_KEY`.
 
@@ -54,7 +54,7 @@ Plus the DB password for `supabase link --project-ref krjbwbvmrpazdmmjstzo`.
    pnpm predeploy:edge && pnpm deploy:edge   # or: npx pnpm@9 ...
    ```
 
-6. **Confirm SPA deploy** — merging web/** to main triggers pay-deploy.yml. Check the Actions run green; open https://pay.vibebrowser.app/pay?uid=1&topup=small&test=true → Ethereum Sepolia 🧪 + aUSD selectable.
+6. **Confirm SPA deploy** — merging web/** to main triggers pay-deploy.yml. Check the Actions run green; open https://pay.agentlabs.cc/pay?uid=1&topup=small&test=true → Ethereum Sepolia 🧪 + aUSD selectable.
 
 7. **Confirm OpenClawBot rollout** — `kubectl --context openclaw-aks -n <ns> rollout status deploy/openclaw-bot`.
 
@@ -70,7 +70,7 @@ Plus the DB password for `supabase link --project-ref krjbwbvmrpazdmmjstzo`.
      ```
    - b. Submit to prod:
      ```bash
-     curl -X POST https://pay.vibebrowser.app/api/payment \
+     curl -X POST https://pay.agentlabs.cc/api/payment \
        -H 'Content-Type: application/json' \
        -d '{"txHash":"0x<from step a>","chainId":"eth_sepolia","token":"ausd","idType":"tg","uid":"<test-tg-id>","topup":"small","apiKey":"<API_KEY>","callbackUrl":"https://admin.openclaw.vibebrowser.app/crypto/webhook"}'
      ```
