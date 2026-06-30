@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import type { ChainId, TokenId } from "@/lib/config";
 import { EVM_CHAINS } from "@/lib/config";
-import { isEvmAvailable, connectEvm, sendEvmTransfer } from "@/lib/wallets/evm";
+import { isEvmAvailable, connectEvm, connectEvmMobile, sendEvmTransfer } from "@/lib/wallets/evm";
 import { isSolanaAvailable, connectSolana, sendSolanaTransfer } from "@/lib/wallets/solana";
 import { buildTonTransferMessage } from "@/lib/wallets/ton";
 import { useTonConnectUI, useTonAddress } from "@tonconnect/ui-react";
@@ -100,8 +100,8 @@ export function WalletConnect({
   const hasExtension = hasEvmWallet || hasSolWallet || isTon;
 
   async function handleConnect() {
-    // If no extension, open install page
-    if (!hasExtension) {
+    // If no extension, open install page (non-EVM only — EVM has mobile QR fallback)
+    if (!hasExtension && !isEvm) {
       window.open(walletInfo.url, "_blank", "noopener,noreferrer");
       return;
     }
@@ -120,6 +120,17 @@ export function WalletConnect({
         // Open TonConnect modal (QR code / wallet list)
         await tonConnectUI.openModal();
       }
+    } catch (err) {
+      onStatus("error", friendlyError(err));
+    }
+  }
+
+  async function handleConnectMobile() {
+    try {
+      const { signer, address } = await connectEvmMobile(chain);
+      setEvmSigner(signer);
+      setConnectedAddress(address);
+      onStatus("pending", `Connected: ${address.slice(0, 6)}...${address.slice(-4)}`);
     } catch (err) {
       onStatus("error", friendlyError(err));
     }
@@ -161,9 +172,10 @@ export function WalletConnect({
 
   return (
     <div className="space-y-3">
-      {/* Connect button — always shown */}
+      {/* Connect buttons — shown when not yet connected */}
       {!connectedAddress && (
         <>
+          {/* Primary connect button */}
           <button
             onClick={handleConnect}
             disabled={disabled}
@@ -181,8 +193,23 @@ export function WalletConnect({
             {isTon && "Connect TON Wallet"}
           </button>
 
-          {/* Install prompt when extension not detected */}
-          {!hasExtension && (
+          {/* Mobile QR connect — EVM only (Coinbase Wallet / Rabby mobile via WalletConnect) */}
+          {isEvm && (
+            <button
+              onClick={handleConnectMobile}
+              disabled={disabled}
+              className={`
+                w-full rounded-lg border border-[#3b82f6]/40 px-4 py-3 text-sm font-semibold
+                text-[#3b82f6] transition-all duration-150
+                ${disabled ? "opacity-50 cursor-not-allowed" : "hover:bg-[#3b82f6]/10 cursor-pointer"}
+              `}
+            >
+              Connect Mobile Wallet
+            </button>
+          )}
+
+          {/* Install prompt when extension not detected (non-EVM only) */}
+          {!hasExtension && !isEvm && (
             <p className="text-xs text-muted text-center">
               {walletInfo.name} not detected.{" "}
               <a
@@ -193,6 +220,22 @@ export function WalletConnect({
               >
                 Install {walletInfo.name}
               </a>
+            </p>
+          )}
+
+          {/* EVM: show install hint only if no extension AND user hasn't opened mobile modal yet */}
+          {isEvm && !hasEvmWallet && (
+            <p className="text-xs text-muted text-center">
+              No extension detected.{" "}
+              <a
+                href={INSTALL_URLS.evm.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-accent underline hover:text-accent-hover"
+              >
+                Install EVM wallet
+              </a>
+              {" "}or use "Connect Mobile Wallet" above.
             </p>
           )}
         </>

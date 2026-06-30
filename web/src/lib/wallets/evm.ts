@@ -3,17 +3,19 @@
 import { BrowserProvider, Contract, parseUnits, type Signer } from "ethers";
 import { ERC20_ABI, EVM_CHAIN_IDS, EVM_CHAIN_PARAMS, type ChainId } from "../config";
 
-declare global {
-  interface Window {
-    ethereum?: {
-      isMetaMask?: boolean;
-      request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
-    };
-  }
+// @reown/appkit augments Window.ethereum as Record<string,unknown>; match that
+// to avoid a TS "Subsequent property declarations" conflict. We cast at point of use.
+type EthereumProvider = {
+  isMetaMask?: boolean;
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+};
+function getEthereum(): EthereumProvider | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (window as unknown as { ethereum?: EthereumProvider }).ethereum;
 }
 
 export function isEvmAvailable(): boolean {
-  return typeof window !== "undefined" && !!window.ethereum;
+  return typeof window !== "undefined" && !!getEthereum();
 }
 
 /** Check if a wallet error is "chain not recognized" (code 4902).
@@ -29,9 +31,11 @@ function isChainNotAddedError(err: unknown): boolean {
 }
 
 export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; address: string }> {
-  if (!window.ethereum) throw new Error("No EVM wallet detected");
+  const eth = getEthereum();
+  if (!eth) throw new Error("No EVM wallet detected");
 
-  const provider = new BrowserProvider(window.ethereum);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const provider = new BrowserProvider(eth as any);
   await provider.send("eth_requestAccounts", []);
 
   // Switch to correct chain
@@ -56,6 +60,47 @@ export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; ad
 
   const signer = await provider.getSigner();
   const address = await signer.getAddress();
+  return { signer, address };
+}
+
+/**
+ * Connect an EVM wallet via WalletConnect v2 QR code (AppKit modal).
+ * Works with Coinbase Wallet mobile (WalletLink) and Rabby mobile (WC v2).
+ * On desktop: shows QR code + wallet list modal.
+ * On mobile: shows deep links into installed wallet apps.
+ */
+export async function connectEvmMobile(
+  chainId: ChainId,
+): Promise<{ signer: Signer; address: string }> {
+  const { openAndWaitForConnection, getAppKitSigner } = await import("./appkit");
+
+  // openAndWaitForConnection subscribes to state BEFORE opening the modal,
+  // then resolves when the modal closes with a connected session, or rejects
+  // with "Wallet connection cancelled" if the user dismisses without connecting.
+  await openAndWaitForConnection();
+
+  const signer = await getAppKitSigner();
+  const address = await signer.getAddress();
+
+  // Request chain switch via the WalletConnect session
+  const targetChainId = EVM_CHAIN_IDS[chainId];
+  if (targetChainId) {
+    try {
+      const ethersProvider = signer.provider as import("ethers").BrowserProvider;
+      await ethersProvider.send("wallet_switchEthereumChain", [{ chainId: targetChainId }]);
+    } catch (err: unknown) {
+      if (isChainNotAddedError(err)) {
+        const chainParams = EVM_CHAIN_PARAMS[chainId];
+        if (chainParams) {
+          const ethersProvider = signer.provider as import("ethers").BrowserProvider;
+          await ethersProvider.send("wallet_addEthereumChain", [chainParams]);
+        }
+      } else {
+        throw err; // rethrow user rejection (4001) and other non-4902 errors
+      }
+    }
+  }
+
   return { signer, address };
 }
 
