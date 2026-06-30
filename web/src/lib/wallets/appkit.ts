@@ -52,7 +52,8 @@ export const appKit = createAppKit({
 export async function getAppKitSigner() {
   const provider = appKit.getProvider("eip155");
   if (!provider) throw new Error("No WalletConnect session");
-  const ethersProvider = new BrowserProvider(provider as Parameters<typeof BrowserProvider>[0]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ethersProvider = new BrowserProvider(provider as any);
   return ethersProvider.getSigner();
 }
 
