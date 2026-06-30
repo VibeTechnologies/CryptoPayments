@@ -195,8 +195,8 @@ test('telegram /topup flow: checkout URL → mock wallet → real edge → Payme
   // Select aUSD token
   await page.getByRole('button', { name: 'aUSD' }).click();
 
-  // Connect wallet
-  await page.getByRole('button', { name: 'Connect Wallet' }).click();
+  // Connect wallet — use browser wallet (injected mock ethereum)
+  await page.locator('button[title="Connect browser wallet"]').click();
 
   // Wait for Pay button to appear (means wallet connected)
   const payBtn = page.getByRole('button', { name: /Pay \$5\.00 AUSD/i });
