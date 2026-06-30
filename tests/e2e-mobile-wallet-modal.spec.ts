@@ -9,7 +9,7 @@
  *
  * Requires:
  *   NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID — real Reown project ID (free: dashboard.reown.com)
- *   BASE_URL — deployed URL (Vercel preview or pay.oclawbox.com)
+ *   BASE_URL — deployed URL (Vercel preview or pay.agentlabs.cc)
  *
  * Does NOT test:
  *   - Actual QR scan (requires real mobile device — see .tasks/35/test-plan.md Tier 4)
@@ -120,4 +120,44 @@ test.describe("Mobile Wallet QR Connect", () => {
     await expect(page.locator('button:has-text("Connect Mobile Wallet")')).not.toBeVisible();
     await expect(page.locator('button:has-text("Connect Phantom")')).toBeVisible();
   });
+
+  // Regression: Coinbase Wallet mobile "no valid asset found"
+  // Fix: coinbasePreference changed to "eoaOnly" (bypasses Smart Wallet domain validation)
+  //      metadata.url changed to use NEXT_PUBLIC_APP_URL (not hardcoded wrong domain)
+  // This test verifies the compiled bundle — not mocks — so a config regression is caught at build time.
+  test("compiled bundle has eoaOnly coinbasePreference and no hardcoded wrong domain", async ({ page }) => {
+    await page.goto("/pay?plan=starter&uid=123456&idtype=tg&test=true");
+    await page.waitForSelector('button:has-text("Connect Mobile Wallet")', { timeout: 10_000 });
+
+    const result = await page.evaluate(async () => {
+      const scriptSrcs = Array.from(document.querySelectorAll("script[src]"))
+        .map((s) => (s as HTMLScriptElement).src)
+        .filter((src) => src.includes("/_next/"));
+
+      let hasEoaOnly = false;
+      let hasWrongDomain = false;
+
+      for (const src of scriptSrcs) {
+        try {
+          const text = await fetch(src).then((r) => r.text());
+          if (text.includes("eoaOnly")) hasEoaOnly = true;
+          if (text.includes("pay.oclawbox.com")) hasWrongDomain = true;
+        } catch {
+          // ignore individual chunk fetch errors
+        }
+      }
+      return { hasEoaOnly, hasWrongDomain };
+    });
+
+    expect(
+      result.hasEoaOnly,
+      "coinbasePreference must be 'eoaOnly' in compiled bundle — 'all' triggers Smart Wallet domain validation and causes Coinbase Wallet mobile to show 'no valid asset found'",
+    ).toBe(true);
+
+    expect(
+      result.hasWrongDomain,
+      "compiled bundle must NOT contain pay.oclawbox.com — that domain causes Coinbase Wallet SDK to reject WalletLink pairing with 'no valid asset found'",
+    ).toBe(false);
+  });
 });
+

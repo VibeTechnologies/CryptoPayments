@@ -15,6 +15,15 @@ if (!projectId) {
   );
 }
 
+// Use the canonical public URL so Coinbase Wallet SDK can validate the dApp origin.
+// NEXT_PUBLIC_APP_URL must be set in production (e.g. https://pay.agentlabs.cc).
+// Falls back to window.location.origin at runtime, then to the production URL.
+// A mismatch between metadata.url and the actual page origin causes Coinbase Wallet
+// to show "no valid asset found" during the WalletLink QR scan flow.
+const appUrl =
+  process.env.NEXT_PUBLIC_APP_URL ??
+  (typeof window !== "undefined" ? window.location.origin : "https://pay.agentlabs.cc");
+
 const ethersAdapter = new EthersAdapter();
 
 export const appKit = createAppKit({
@@ -25,8 +34,8 @@ export const appKit = createAppKit({
   metadata: {
     name: "OpenClawBox Payments",
     description: "Pay for OpenClawBox subscriptions with crypto",
-    url: "https://pay.oclawbox.com",
-    icons: ["https://pay.oclawbox.com/icon.png"],
+    url: appUrl,
+    icons: [`${appUrl}/globe.svg`],
   },
   // Rabby must be explicit — its WalletConnect Explorer listing is miscategorized as
   // "Injected Wallet" so it does not appear automatically in AppKit's featured list.
@@ -35,9 +44,12 @@ export const appKit = createAppKit({
     "18388be9ac2d02726dbac9777c96efaac06d744b2f6d580fccdd4127a6d01fd1", // Rabby Wallet
     "fd20dc426fb37566d803205b19bbc1d4096b248ac04548e3cfb6b3a38bd033aa", // Coinbase Wallet
   ],
-  // 'all': show Coinbase Smart Wallet popup AND WalletLink mobile QR
-  // 'eoaOnly': WalletLink mobile QR only (no Smart Wallet)
-  coinbasePreference: "all",
+  // 'eoaOnly': WalletLink mobile QR only — bypasses Smart Wallet popup.
+  // Smart Wallet ('all' or 'smartWalletOnly') requires dApp domain registration and
+  // validates metadata.url against window.location.origin; any mismatch causes
+  // Coinbase Wallet mobile to show "no valid asset found". For a payment dApp that
+  // does not need Smart Wallet features, 'eoaOnly' is the correct preference.
+  coinbasePreference: "eoaOnly",
   features: {
     analytics: false,
     email: false,
