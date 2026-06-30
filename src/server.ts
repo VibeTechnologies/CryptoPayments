@@ -333,12 +333,11 @@ export function createApp(injectedDb?: DB) {
     }
   });
 
-  // ── Check payment status (legacy) ──────────────────────────────────────────
+  // ── Check payment status ───────────────────────────────────────────────────
 
   app.get("/api/payment/:id", async (c) => {
-    if (!requireApiKey(c)) {
-      return c.json({ error: "Unauthorized" }, 401);
-    }
+    // Public by payment ID — no API key required for polling (frontend can't hold secrets).
+    // Admin callers may still pass x-api-key; it's accepted but not enforced here.
 
     const id = c.req.param("id");
     // Legacy: try as a stripe_id (pi_...) or number
@@ -347,8 +346,31 @@ export function createApp(injectedDb?: DB) {
       return c.json({ error: "Invalid payment ID" }, 400);
     }
 
-    const payment = await getPaymentById(appDb, id);
+    let payment = await getPaymentById(appDb, id);
     if (!payment) return c.json({ error: "Payment not found" }, 404);
+
+    // Lazy re-verification: if still pending, check the chain now.
+    // This is what powers the frontend polling loop — the status transitions
+    // from "pending" to "verified" (or "failed") on the first GET after mining.
+    if (payment.status === "pending" && payment.tx_hash && payment.chain_id) {
+      try {
+        const result = await verifyTransfer(payment.tx_hash, payment.chain_id as ChainId, config);
+        if (result && result !== "pending") {
+          await markPaymentVerified(appDb, payment.id, {
+            fromAddress: result.from,
+            toAddress: result.to,
+            amountRaw: result.amountRaw,
+            amountUsd: result.amountUsd,
+            blockNumber: result.blockNumber,
+            planId: undefined,
+          });
+          payment = await getPaymentById(appDb, payment.id);
+        }
+        // result === "pending": tx not yet mined — return current status as-is
+      } catch {
+        // Re-verify failed (RPC error, etc.) — return current DB status; client will retry
+      }
+    }
 
     return c.json({ payment });
   });
