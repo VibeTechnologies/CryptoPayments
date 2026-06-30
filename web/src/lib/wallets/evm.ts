@@ -64,25 +64,18 @@ export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; ad
 }
 
 /**
- * Connect an EVM wallet via WalletConnect v2 QR code (AppKit modal).
- * Works with Coinbase Wallet mobile (WalletLink) and Rabby mobile (WC v2).
- * On desktop: shows QR code + wallet list modal.
- * On mobile: shows deep links into installed wallet apps.
- */
-export async function connectEvmMobile(
-  chainId: ChainId,
-): Promise<{ signer: Signer; address: string }> {
-  return connectEvmAppKit(chainId, "AllWallets");
-}
-
-/**
  * Connect via Coinbase Wallet (Base network official wallet).
- * Opens AppKit Connect view with Coinbase Wallet as a featured option.
+ * Opens AppKit ConnectingExternal view directly for the coinbaseWallet connector —
+ * bypasses the picker and goes straight to the Coinbase Wallet QR/deeplink flow.
  */
 export async function connectEvmCoinbase(
   chainId: ChainId,
 ): Promise<{ signer: Signer; address: string }> {
-  return connectEvmAppKit(chainId, "Connect");
+  return connectEvmAppKit(chainId, "ConnectingExternal", {
+    id: "coinbaseWallet",
+    type: "EXTERNAL" as const,
+    name: "Coinbase Wallet",
+  });
 }
 
 /**
@@ -96,14 +89,12 @@ export async function connectEvmWalletConnect(
 
 async function connectEvmAppKit(
   chainId: ChainId,
-  view: "AllWallets" | "ConnectingWalletConnectBasic" | "Connect",
+  view: "AllWallets" | "ConnectingWalletConnectBasic" | "Connect" | "ConnectingExternal",
+  connector?: Record<string, unknown>,
 ): Promise<{ signer: Signer; address: string }> {
   const { openAndWaitForConnection, getAppKitSigner } = await import("./appkit");
 
-  // openAndWaitForConnection subscribes to state BEFORE opening the modal,
-  // then resolves when the modal closes with a connected session, or rejects
-  // with "Wallet connection cancelled" if the user dismisses without connecting.
-  await openAndWaitForConnection(view);
+  await openAndWaitForConnection(view, connector);
 
   const signer = await getAppKitSigner();
   const address = await signer.getAddress();

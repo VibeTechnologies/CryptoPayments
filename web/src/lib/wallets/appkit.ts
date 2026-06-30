@@ -78,15 +78,18 @@ export async function getAppKitSigner() {
  * If the modal closes with a connected session, the promise resolves.
  * If the modal closes without a connection (user cancelled), it rejects.
  */
-export function openAndWaitForConnection(view?: "ConnectingWalletConnectBasic" | "AllWallets" | "Connect"): Promise<void> {
+type AppKitView = "ConnectingWalletConnectBasic" | "AllWallets" | "Connect" | "ConnectingExternal";
+
+export function openAndWaitForConnection(
+  view?: AppKitView,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  connector?: Record<string, unknown>,
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    // Declare unsub as let so synchronous subscribeState callbacks (e.g. in tests)
-    // can safely call unsub?.() before the assignment completes without TDZ crash.
     let unsub: (() => void) | undefined;
-    // Subscribe BEFORE open() so we never miss the close event
     unsub = appKit.subscribeState((state) => {
       if (!state.open) {
-        unsub?.(); // no-op if called synchronously before assignment completes
+        unsub?.();
         if (appKit.getIsConnectedState()) {
           resolve();
         } else {
@@ -94,7 +97,10 @@ export function openAndWaitForConnection(view?: "ConnectingWalletConnectBasic" |
         }
       }
     });
-    appKit.open(view ? { view } : undefined).catch((err) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const opts: any = view ? { view } : undefined;
+    if (opts && connector) opts.connector = connector;
+    appKit.open(opts).catch((err) => {
       unsub?.();
       reject(err);
     });
