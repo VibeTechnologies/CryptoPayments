@@ -45,8 +45,12 @@ jobs:
           mkdir -p testnet
           echo "${{ secrets.TESTNET_WALLET_1_JSON }}" | base64 -d > testnet/wallet-1.json
 
-      - name: Run E2E test
+      - name: Run E2E tests
         env:
           CHECKOUT_SECRET: ${{ secrets.CHECKOUT_SECRET }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: node_modules/.bin/playwright test tests/e2e-telegram-topup.spec.ts --reporter=list
+        run: |
+          node_modules/.bin/playwright test \
+            tests/e2e-telegram-topup.spec.ts \
+            tests/e2e-full-wallet-flow.spec.ts \
+            --reporter=list
