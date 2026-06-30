@@ -20,9 +20,6 @@ importers:
       '@solana/web3.js':
         specifier: ^1.98.4
         version: 1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@5.0.10)
-      '@testing-library/dom':
-        specifier: ^10.4.1
-        version: 10.4.1
       '@ton/core':
         specifier: ^0.63.1
         version: 0.63.1(@ton/crypto@3.3.0)
