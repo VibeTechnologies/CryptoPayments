@@ -30,6 +30,8 @@ const TOKEN_DECIMALS: Record<"usdt" | "usdc" | "ausd", number> = {
   ausd: 6,
 };
 
+export type VerifyResult = VerifiedTransfer | null | "pending";
+
 export interface VerifiedTransfer {
   from: string;
   to: string;
@@ -51,7 +53,7 @@ export async function verifyEvmTransfer(
   txHash: string,
   chainId: "base" | "eth" | "arbitrum" | "base_sepolia" | "eth_sepolia",
   config: Config,
-): Promise<VerifiedTransfer | null> {
+): Promise<VerifyResult> {
   const chain = chainId === "base_sepolia" ? baseSepolia
     : chainId === "eth_sepolia" ? sepolia
     : chainId === "base" ? base
@@ -77,10 +79,19 @@ export async function verifyEvmTransfer(
     transport: http(rpcUrl),
   });
 
-  // Get transaction receipt
-  const receipt = await client.getTransactionReceipt({
-    hash: txHash as `0x${string}`,
-  });
+  // Get transaction receipt — may throw if tx is not yet mined
+  let receipt: Awaited<ReturnType<typeof client.getTransactionReceipt>>;
+  try {
+    receipt = await client.getTransactionReceipt({
+      hash: txHash as `0x${string}`,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/could not be found|not found/i.test(msg)) {
+      return "pending";
+    }
+    throw err;
+  }
 
   if (!receipt || receipt.status === "reverted") {
     return null;
@@ -91,7 +102,7 @@ export async function verifyEvmTransfer(
   const currentBlock = await client.getBlockNumber();
   const confirmations = Number(currentBlock - receipt.blockNumber) + 1;
   if (confirmations < MIN_CONFIRMATIONS[chainId]) {
-    return null; // not yet confirmed — caller can retry
+    return "pending"; // not yet confirmed — caller can retry
   }
 
   // Look for Transfer events to our wallet from known stablecoins
@@ -465,7 +476,7 @@ export async function verifyTransfer(
   txHash: string,
   chainId: ChainId,
   config: Config,
-): Promise<VerifiedTransfer | null> {
+): Promise<VerifyResult> {
   switch (chainId) {
     case "base":
     case "eth":

@@ -259,6 +259,12 @@ export function createApp(injectedDb?: DB) {
     try {
       const result = await verifyTransfer(body.txHash, body.chainId, config);
 
+      if (result === "pending") {
+        // TX not yet mined or not enough confirmations — leave payment as pending, caller retries
+        const current = await getPaymentById(appDb, payment.id);
+        return c.json({ payment: current, pending: true }, 202);
+      }
+
       if (!result) {
         await markPaymentFailed(appDb, payment.id);
         const updated = await getPaymentById(appDb, payment.id);
