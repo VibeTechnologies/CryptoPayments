@@ -107,6 +107,16 @@ describe("API client", () => {
         "Verification failed (500)",
       );
     });
+
+    it("returns payment data on 202 pending without throwing", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false, // 202 is not .ok in some fetch impls — test both cases
+        status: 202,
+        json: async () => ({ payment: { id: 42, status: "pending" }, pending: true }),
+      });
+      const result = await submitPayment({ txHash: "0xabc", chainId: "base", token: "usdc", idType: "tg", uid: "123" } as any);
+      expect(result.payment?.status).toBe("pending");
+    });
   });
 
   describe("checkPaymentStatus", () => {

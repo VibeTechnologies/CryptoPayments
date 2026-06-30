@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { fetchConfig, submitPayment } from "@/lib/api";
+import { fetchConfig, submitPayment, checkPaymentStatus } from "@/lib/api";
 import {
   type AppConfig,
   type ChainId,
@@ -156,6 +156,47 @@ export default function PayPage() {
   // Get token contract address
   const tokenAddress = config?.tokens[selectedChain]?.[selectedToken] ?? "";
 
+  /** Poll GET /api/payment/:id until verified, failed, or timeout (90s). */
+  async function pollPaymentVerified(id: string): Promise<void> {
+    const POLL_INTERVAL_MS = 3_000;
+    const MAX_ATTEMPTS = 30; // 90s total
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      const result = await checkPaymentStatus(id);
+      const payment = result.payment;
+      if (payment?.status === "verified") {
+        const topupKey = payment.topup_id || topup;
+        const topupPack = topupKey ? TOPUP_PACKS[topupKey] : null;
+        const label = topupPack
+          ? `${topupPack.label} ($${topupPack.price}) — `
+          : payment.plan_id
+          ? `${payment.plan_id.charAt(0).toUpperCase() + payment.plan_id.slice(1)} plan — `
+          : "";
+        setStatus({
+          type: "success",
+          message: `Payment verified! ${label}$${payment.amount_usd.toFixed(2)} ${payment.token.toUpperCase()}`,
+        });
+        setVerified(true);
+        if (window.Telegram?.WebApp) {
+          setTimeout(() => window.Telegram?.WebApp?.close(), 3000);
+        }
+        return;
+      }
+      if (payment?.status === "failed") {
+        setStatus({ type: "error", message: result.error || "Verification failed. Payment not found on-chain." });
+        return;
+      }
+      // still pending — update spinner message with elapsed time
+      const elapsed = ((i + 1) * POLL_INTERVAL_MS) / 1000;
+      setStatus({ type: "pending", message: `Waiting for confirmation... (${elapsed}s)` });
+    }
+    // Timed out
+    setStatus({
+      type: "error",
+      message: "Transaction is taking longer than expected. Check back in a few minutes.",
+    });
+  }
+
   // Handle wallet transaction completion
   const handleTxSent = useCallback(
     async (hash: string) => {
@@ -193,6 +234,12 @@ export default function PayPage() {
         exp: intentExp || undefined,
         sig: intentSig || undefined,
       });
+
+      if (result.payment && result.payment.status !== "verified") {
+        setStatus({ type: "pending", message: "Waiting for confirmation..." });
+        await pollPaymentVerified(result.payment.id);
+        return;
+      }
 
       if (result.payment?.status === "verified") {
         const p = result.payment;

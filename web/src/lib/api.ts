@@ -18,6 +18,9 @@ export async function submitPayment(body: PaymentRequest): Promise<PaymentResult
   if (res.status === 409) {
     throw new Error("This transaction was already submitted.");
   }
+  if (res.status === 202) {
+    return data; // pending — don't throw, let caller poll
+  }
   if (!res.ok) {
     throw new Error(data.error || `Verification failed (${res.status})`);
   }
