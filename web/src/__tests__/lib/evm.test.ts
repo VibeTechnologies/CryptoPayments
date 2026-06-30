@@ -26,6 +26,14 @@ vi.mock("@/lib/wallets/appkit", () => ({
   openAndWaitForConnection: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Mock SDK so the desktop path throws synchronously instead of hanging on network
+const mockMakeWeb3Provider = vi.fn(() => { throw new Error("SDK not available in test"); });
+vi.mock("@coinbase/wallet-sdk", () => ({
+  CoinbaseWalletSDK: vi.fn(function (this: any) {
+    this.makeWeb3Provider = mockMakeWeb3Provider;
+  }),
+}));
+
 import { openAndWaitForConnection, getAppKitSigner } from "@/lib/wallets/appkit";
 
 describe("isEvmAvailable", () => {
@@ -187,17 +195,12 @@ describe("connectEvmCoinbase", () => {
     expect(result.address).toBe("0xAbCdEf0123456789AbCdEf0123456789AbCdEf01");
   });
 
-  it("does NOT use injected ethereum when isCoinbaseWallet is false (desktop)", async () => {
+  it("does NOT use injected ethereum when isCoinbaseWallet is false (desktop path uses SDK)", async () => {
     (window as any).ethereum = { isCoinbaseWallet: false, request: vi.fn() };
-    // SDK path — @coinbase/wallet-sdk is not mocked here so it would throw.
-    // Just confirm it doesn't call BrowserProvider.send (which is the connectEvm path).
     vi.clearAllMocks();
-    try {
-      await connectEvmCoinbase("base");
-    } catch {
-      // expected — SDK not available in test env
-    }
-    // connectEvm path was NOT taken
-    expect(mockSend).not.toHaveBeenCalledWith("eth_requestAccounts", []);
+    // SDK mock throws — confirms the SDK branch was taken, not connectEvm
+    await expect(connectEvmCoinbase("base")).rejects.toThrow("SDK not available in test");
+    // connectEvm's BrowserProvider.send was NOT called
+    expect(mockSend).not.toHaveBeenCalled();
   });
 });
