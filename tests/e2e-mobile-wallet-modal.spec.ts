@@ -12,19 +12,19 @@
 import { test, expect } from "@playwright/test";
 
 test.describe("Mobile Wallet QR Connect", () => {
-  test("3 EVM wallet buttons are visible on Base chain", async ({ page }) => {
+  test("3 EVM wallet icon buttons are visible on Base chain", async ({ page }) => {
     await page.goto("/pay?plan=starter&uid=123456&idtype=tg&test=true");
-    await page.waitForSelector('button:has-text("Connect browser wallet")', { timeout: 10_000 });
+    await page.waitForSelector('button[title="Connect browser wallet"]', { timeout: 10_000 });
 
-    await expect(page.locator('button:has-text("Connect browser wallet")')).toBeVisible();
-    await expect(page.locator('button:has-text("Connect Base wallet")')).toBeVisible();
-    await expect(page.locator('button:has-text("Connect WalletConnect")')).toBeVisible();
+    await expect(page.locator('button[title="Connect browser wallet"]')).toBeVisible();
+    await expect(page.locator('button[title="Connect Base wallet"]')).toBeVisible();
+    await expect(page.locator('button[title="Connect WalletConnect"]')).toBeVisible();
   });
 
   test("AppKit modal opens when clicking Connect Base wallet", async ({ page }) => {
     await page.goto("/pay?plan=starter&uid=123456&idtype=tg&test=true");
-    await page.waitForSelector('button:has-text("Connect Base wallet")', { timeout: 10_000 });
-    await page.locator('button:has-text("Connect Base wallet")').click();
+    await page.waitForSelector('button[title="Connect Base wallet"]', { timeout: 10_000 });
+    await page.locator('button[title="Connect Base wallet"]').click();
 
     const modalHost = page.locator("appkit-modal, wui-modal, w3m-modal").first();
     await expect(modalHost).toBeAttached({ timeout: 8_000 });
@@ -72,8 +72,8 @@ test.describe("Mobile Wallet QR Connect", () => {
     await page.locator("text=/Solana/i").first().click();
 
     await expect(page.locator('button:has-text("Connect Phantom")')).toBeVisible();
-    await expect(page.locator('button:has-text("Connect Base wallet")')).not.toBeVisible();
-    await expect(page.locator('button:has-text("Connect WalletConnect")')).not.toBeVisible();
+    await expect(page.locator('button[title="Connect Base wallet"]')).not.toBeVisible();
+    await expect(page.locator('button[title="Connect WalletConnect"]')).not.toBeVisible();
   });
 
   // Regression: Coinbase Wallet mobile "no valid asset found"

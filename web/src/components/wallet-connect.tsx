@@ -188,46 +188,46 @@ export function WalletConnect({
       {/* Connect buttons — shown when not yet connected */}
       {!connectedAddress && (
         <>
-          {/* EVM: 3 explicit connect options */}
+          {/* EVM: 3 icon-only connect buttons in a row */}
           {isEvm && (
-            <div className="flex flex-col gap-2">
+            <div className="flex gap-2">
               <button
                 onClick={handleConnect}
                 disabled={disabled}
+                title="Connect browser wallet"
                 className={`
-                  w-full flex items-center gap-3 rounded-lg px-4 py-3 text-sm font-semibold
+                  flex items-center justify-center rounded-lg p-3
                   bg-[#3b82f6] hover:bg-[#2563eb] text-white transition-all duration-150
                   ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
                 `}
               >
-                <TbBrowserPlus size={20} />
-                Connect browser wallet
+                <TbBrowserPlus size={22} />
               </button>
 
               <button
                 onClick={handleConnectMobile}
                 disabled={disabled}
+                title="Connect Base wallet"
                 className={`
-                  w-full flex items-center gap-3 rounded-lg px-4 py-3 text-sm font-semibold
+                  flex items-center justify-center rounded-lg p-3
                   bg-[#0052FF] hover:bg-[#0040cc] text-white transition-all duration-150
                   ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
                 `}
               >
-                <SiCoinbase size={18} />
-                Connect Base wallet
+                <SiCoinbase size={20} />
               </button>
 
               <button
                 onClick={handleConnectWalletConnect}
                 disabled={disabled}
+                title="Connect WalletConnect"
                 className={`
-                  w-full flex items-center gap-3 rounded-lg px-4 py-3 text-sm font-semibold
+                  flex items-center justify-center rounded-lg p-3
                   bg-[#3B99FC] hover:bg-[#2a88eb] text-white transition-all duration-150
                   ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
                 `}
               >
-                <SiWalletconnect size={18} />
-                Connect WalletConnect
+                <SiWalletconnect size={20} />
               </button>
             </div>
           )}
