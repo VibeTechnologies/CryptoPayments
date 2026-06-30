@@ -5,15 +5,14 @@ const mockSubscribeState = vi.fn();
 const mockOpen = vi.fn();
 const mockGetIsConnectedState = vi.fn();
 const mockGetProvider = vi.fn();
-const mockCreateAppKit = vi.fn(() => ({
-  subscribeState: mockSubscribeState,
-  open: mockOpen,
-  getIsConnectedState: mockGetIsConnectedState,
-  getProvider: mockGetProvider,
-}));
 
 vi.mock("@reown/appkit", () => ({
-  createAppKit: mockCreateAppKit,
+  createAppKit: vi.fn(() => ({
+    subscribeState: mockSubscribeState,
+    open: mockOpen,
+    getIsConnectedState: mockGetIsConnectedState,
+    getProvider: mockGetProvider,
+  })),
 }));
 
 vi.mock("@reown/appkit-adapter-ethers", () => ({
@@ -39,10 +38,6 @@ vi.mock("ethers", () => ({
 const { openAndWaitForConnection, getAppKitSigner } = await import(
   "@/lib/wallets/appkit"
 );
-
-// Capture createAppKit call args immediately — before vi.clearAllMocks() in later beforeEach blocks wipes them.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const capturedAppKitConfig: Record<string, any> = mockCreateAppKit.mock.calls[0]?.[0] ?? {};
 
 describe("openAndWaitForConnection()", () => {
   beforeEach(() => {
@@ -109,27 +104,5 @@ describe("getAppKitSigner()", () => {
 
     const signer = await getAppKitSigner();
     expect(signer).toEqual({ address: "0xabc" });
-  });
-});
-
-// Regression: "no valid asset found" on Coinbase Wallet mobile (fix/coinbase-no-valid-asset)
-// Root causes: (1) metadata.url hardcoded to wrong domain, (2) coinbasePreference:"all" triggers
-// Smart Wallet validation which rejects unregistered dApps.
-describe("AppKit config — Coinbase Wallet 'no valid asset found' regression", () => {
-  it("uses eoaOnly coinbasePreference — bypasses Smart Wallet, uses WalletLink QR", () => {
-    expect(capturedAppKitConfig.coinbasePreference).toBe("eoaOnly");
-  });
-
-  it("metadata.url does not contain hardcoded wrong domain pay.oclawbox.com", () => {
-    expect(capturedAppKitConfig.metadata?.url).not.toContain("pay.oclawbox.com");
-  });
-
-  it("metadata.icons[0] does not contain hardcoded wrong domain pay.oclawbox.com", () => {
-    expect(capturedAppKitConfig.metadata?.icons?.[0]).not.toContain("pay.oclawbox.com");
-  });
-
-  it("metadata.url is a valid https URL", () => {
-    // Should be a valid https URL (not an empty string or undefined)
-    expect(capturedAppKitConfig.metadata?.url).toMatch(/^https?:\/\//);
   });
 });

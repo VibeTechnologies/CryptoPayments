@@ -35,7 +35,7 @@ export const appKit = createAppKit({
     name: "OpenClawBox Payments",
     description: "Pay for OpenClawBox subscriptions with crypto",
     url: appUrl,
-    icons: [`${appUrl}/icon.png`],
+    icons: [`${appUrl}/globe.svg`],
   },
   // Rabby must be explicit — its WalletConnect Explorer listing is miscategorized as
   // "Injected Wallet" so it does not appear automatically in AppKit's featured list.
