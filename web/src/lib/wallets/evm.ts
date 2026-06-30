@@ -1,6 +1,6 @@
 // EVM wallet integration via ethers.js v6 (works with any EIP-1193 wallet)
 
-import { BrowserProvider, Contract, parseUnits, type Signer } from "ethers";
+import { BrowserProvider, Contract, getAddress, parseUnits, type Signer } from "ethers";
 import { ERC20_ABI, EVM_CHAIN_IDS, EVM_CHAIN_PARAMS, type ChainId } from "../config";
 
 // @reown/appkit augments Window.ethereum as Record<string,unknown>; match that
@@ -175,6 +175,8 @@ export async function sendEvmTransfer(
 
   const amount = parseUnits(amountUsd.toString(), 6); // USDC/USDT = 6 decimals
   const contract = new Contract(tokenAddress, ERC20_ABI, signer);
-  const tx = await contract.transfer(toAddress, amount);
+  // getAddress() enforces EIP-55 checksum — prevents ethers v6 ENS lookup
+  // for recipient addresses that are always plain hex, never ENS names.
+  const tx = await contract.transfer(getAddress(toAddress), amount);
   return tx.hash;
 }
