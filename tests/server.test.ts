@@ -870,9 +870,10 @@ describe("Server API", () => {
   // ── GET /api/payment/:id ──
 
   describe("GET /api/payment/:id", () => {
-    it("rejects without API key", async () => {
+    it("returns 404 for non-existent payment (no auth required)", async () => {
+      // GET is public by payment ID — auth gate removed so frontend polling works.
       const res = await app.request("/api/payment/pi_test123");
-      expect(res.status).toBe(401);
+      expect(res.status).toBe(404);
     });
 
     it("returns payment by ID with valid API key", async () => {
