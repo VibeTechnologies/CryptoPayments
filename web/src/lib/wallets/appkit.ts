@@ -47,11 +47,40 @@ export const appKit = createAppKit({
 
 /**
  * Get an ethers v6 Signer from the active AppKit WalletConnect session.
- * Call this after appKit.open() resolves and getIsConnected() is true.
+ * Call after openAndWaitForConnection() resolves.
  */
 export async function getAppKitSigner() {
   const provider = appKit.getProvider("eip155");
   if (!provider) throw new Error("No WalletConnect session");
   const ethersProvider = new BrowserProvider(provider as Parameters<typeof BrowserProvider>[0]);
   return ethersProvider.getSigner();
+}
+
+/**
+ * Open the AppKit modal and wait for the user to complete wallet connection.
+ *
+ * appKit.open() resolves as soon as the modal is displayed — not when the
+ * WalletConnect handshake finishes. We must subscribe to state changes before
+ * calling open() and wait for the modal to close (state.open = false).
+ * If the modal closes with a connected session, the promise resolves.
+ * If the modal closes without a connection (user cancelled), it rejects.
+ */
+export function openAndWaitForConnection(): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    // Subscribe BEFORE open() so we never miss the close event
+    const unsub = appKit.subscribeState((state) => {
+      if (!state.open) {
+        unsub();
+        if (appKit.getIsConnectedState()) {
+          resolve();
+        } else {
+          reject(new Error("Wallet connection cancelled"));
+        }
+      }
+    });
+    appKit.open().catch((err) => {
+      unsub();
+      reject(err);
+    });
+  });
 }

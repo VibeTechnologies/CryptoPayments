@@ -20,14 +20,13 @@ vi.mock("ethers", () => {
 
 vi.mock("@/lib/wallets/appkit", () => ({
   appKit: {
-    open: vi.fn().mockResolvedValue(undefined),
-    getIsConnected: vi.fn(() => true),
     getProvider: vi.fn(() => null),
   },
   getAppKitSigner: vi.fn(),
+  openAndWaitForConnection: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { appKit, getAppKitSigner } from "@/lib/wallets/appkit";
+import { openAndWaitForConnection, getAppKitSigner } from "@/lib/wallets/appkit";
 
 describe("isEvmAvailable", () => {
   it("returns false when window.ethereum is undefined", () => {
@@ -130,18 +129,17 @@ describe("connectEvm", () => {
 describe("connectEvmMobile", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(appKit.open).mockResolvedValue(undefined);
-    vi.mocked(appKit.getIsConnected).mockReturnValue(true);
+    vi.mocked(openAndWaitForConnection).mockResolvedValue(undefined);
   });
 
-  it("calls appKit.open()", async () => {
+  it("calls openAndWaitForConnection()", async () => {
     vi.mocked(getAppKitSigner).mockResolvedValue({
       getAddress: vi.fn().mockResolvedValue("0xMobileAddr"),
       provider: { send: vi.fn().mockResolvedValue(undefined) },
     } as any);
 
     await connectEvmMobile("base");
-    expect(appKit.open).toHaveBeenCalled();
+    expect(openAndWaitForConnection).toHaveBeenCalled();
   });
 
   it("returns signer and address after connected", async () => {
@@ -156,8 +154,8 @@ describe("connectEvmMobile", () => {
     expect(result.signer).toBeDefined();
   });
 
-  it("throws 'Wallet connection cancelled' when getIsConnected returns false", async () => {
-    vi.mocked(appKit.getIsConnected).mockReturnValue(false);
+  it("throws 'Wallet connection cancelled' when openAndWaitForConnection rejects", async () => {
+    vi.mocked(openAndWaitForConnection).mockRejectedValue(new Error("Wallet connection cancelled"));
     await expect(connectEvmMobile("base")).rejects.toThrow("Wallet connection cancelled");
   });
 

@@ -68,13 +68,12 @@ export async function connectEvm(chainId: ChainId): Promise<{ signer: Signer; ad
 export async function connectEvmMobile(
   chainId: ChainId,
 ): Promise<{ signer: Signer; address: string }> {
-  const { appKit, getAppKitSigner } = await import("./appkit");
+  const { openAndWaitForConnection, getAppKitSigner } = await import("./appkit");
 
-  await appKit.open();
-
-  if (!appKit.getIsConnected()) {
-    throw new Error("Wallet connection cancelled");
-  }
+  // openAndWaitForConnection subscribes to state BEFORE opening the modal,
+  // then resolves when the modal closes with a connected session, or rejects
+  // with "Wallet connection cancelled" if the user dismisses without connecting.
+  await openAndWaitForConnection();
 
   const signer = await getAppKitSigner();
   const address = await signer.getAddress();
@@ -92,6 +91,8 @@ export async function connectEvmMobile(
           const ethersProvider = signer.provider as import("ethers").BrowserProvider;
           await ethersProvider.send("wallet_addEthereumChain", [chainParams]);
         }
+      } else {
+        throw err; // rethrow user rejection (4001) and other non-4902 errors
       }
     }
   }

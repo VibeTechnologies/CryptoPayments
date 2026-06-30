@@ -27,8 +27,9 @@ vi.mock("@/lib/wallets/ton", () => ({
 }));
 
 vi.mock("@/lib/wallets/appkit", () => ({
-  appKit: { open: vi.fn(), getIsConnected: vi.fn(() => true) },
+  appKit: { getProvider: vi.fn(() => null) },
   getAppKitSigner: vi.fn(),
+  openAndWaitForConnection: vi.fn().mockResolvedValue(undefined),
 }));
 
 // Mock TonConnect hooks
