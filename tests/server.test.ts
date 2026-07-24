@@ -1346,4 +1346,213 @@ describe("Server API", () => {
       expect(body.status).toBe("open");
     });
   });
+
+  // ── GET lazy re-verification (OpenClawBot#3220 regression) ────────────────
+
+  describe("GET /api/payment/:id lazy re-verification", () => {
+    const originalFetch = globalThis.fetch;
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it("pending POST then GET poll verifies, persists planId, and sends callback with plan/topup context", async () => {
+      const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+      globalThis.fetch = vi.fn(async (url: any, init?: any) => {
+        fetchCalls.push({ url: String(url), init });
+        return new Response("OK", { status: 200 });
+      }) as any;
+
+      // POST: tx not mined yet → 202 pending
+      mockedVerifyTransfer.mockResolvedValueOnce("pending");
+      const postRes = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xlazy_verify_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "77",
+          plan: "starter",
+          apiKey: "test-api-key",
+          callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
+          tenantType: "team",
+          vmProvider: "hetzner",
+          hostType: "vps",
+        }),
+      });
+      expect(postRes.status).toBe(202);
+      const posted = await postRes.json();
+      expect(posted.payment.status).toBe("pending");
+      const paymentId = posted.payment.id;
+
+      // No callback yet
+      expect(
+        fetchCalls.filter((c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook"),
+      ).toHaveLength(0);
+
+      // GET poll: tx now mined at $10 (starter)
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 12345,
+        txHash: "0xlazy_verify_tx",
+      });
+      const getRes = await app.request(`/api/payment/${paymentId}`);
+      expect(getRes.status).toBe(200);
+      const body = await getRes.json();
+      expect(body.payment.status).toBe("verified");
+      // Regression: planId used to be dropped (planId: undefined) on the GET path
+      expect(body.payment.plan_id).toBe("starter");
+
+      // Callback fired async — give it a tick
+      await new Promise((r) => setTimeout(r, 100));
+      const callbackCall = fetchCalls.find(
+        (c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook",
+      );
+      // Regression: GET path never sent the webhook → tenant never provisioned
+      expect(callbackCall).toBeDefined();
+      expect(callbackCall!.init.method).toBe("POST");
+      const cbBody = JSON.parse(callbackCall!.init.body as string);
+      expect(cbBody.event).toBe("payment.verified");
+      expect(cbBody.payment.plan).toBe("starter");
+      expect(cbBody.payment.tenantType).toBe("team");
+      expect(cbBody.payment.vmProvider).toBe("hetzner");
+      expect(cbBody.payment.hostType).toBe("vps");
+      expect(cbBody.payment.uid).toBe("77");
+      expect(cbBody.payment.txHash).toBe("0xlazy_verify_tx");
+      const headers = callbackCall!.init.headers as Record<string, string>;
+      expect(headers["X-Signature"]).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    it("GET poll with underpaid top-up amount marks payment failed and sends no callback", async () => {
+      const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+      globalThis.fetch = vi.fn(async (url: any, init?: any) => {
+        fetchCalls.push({ url: String(url), init });
+        return new Response("OK", { status: 200 });
+      }) as any;
+
+      mockedVerifyTransfer.mockResolvedValueOnce("pending");
+      const postRes = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xlazy_underpaid_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "78",
+          topup: "medium", // $10 pack
+          apiKey: "test-api-key",
+          callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
+        }),
+      });
+      expect(postRes.status).toBe(202);
+      const posted = await postRes.json();
+      const paymentId = posted.payment.id;
+
+      // GET poll: mined but only $5 — underpaid for medium ($10)
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "5000000",
+        amountUsd: 5,
+        token: "usdc",
+        blockNumber: 12346,
+        txHash: "0xlazy_underpaid_tx",
+      });
+      const getRes = await app.request(`/api/payment/${paymentId}`);
+      expect(getRes.status).toBe(200);
+      const body = await getRes.json();
+      // Regression: GET used to mark ANY mined tx verified without amount checks
+      expect(body.payment.status).toBe("failed");
+
+      await new Promise((r) => setTimeout(r, 100));
+      expect(
+        fetchCalls.filter((c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook"),
+      ).toHaveLength(0);
+    });
+
+    it("GET poll with wrong plan amount marks payment failed and sends no callback", async () => {
+      const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+      globalThis.fetch = vi.fn(async (url: any, init?: any) => {
+        fetchCalls.push({ url: String(url), init });
+        return new Response("OK", { status: 200 });
+      }) as any;
+
+      mockedVerifyTransfer.mockResolvedValueOnce("pending");
+      const postRes = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xlazy_wrongplan_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "79",
+          plan: "pro", // $25
+          apiKey: "test-api-key",
+          callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
+        }),
+      });
+      expect(postRes.status).toBe(202);
+      const posted = await postRes.json();
+      const paymentId = posted.payment.id;
+
+      // GET poll: mined at $10 (starter) — doesn't match requested "pro"
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 12347,
+        txHash: "0xlazy_wrongplan_tx",
+      });
+      const getRes = await app.request(`/api/payment/${paymentId}`);
+      const body = await getRes.json();
+      expect(body.payment.status).toBe("failed");
+
+      await new Promise((r) => setTimeout(r, 100));
+      expect(
+        fetchCalls.filter((c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook"),
+      ).toHaveLength(0);
+    });
+
+    it("accepts a UUID payment id (regression #3220 UUID_RE guard)", async () => {
+      // Seed a customer + payment intent whose primary id is a real UUID.
+      const uuid = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
+      await (mockDb as any).from("customers").insert({
+        id: "cust-uuid-1",
+        id_type: "tg",
+        uid: "555",
+        metadata: {},
+      }).select("*").single();
+      await (mockDb as any).from("payment_intents").insert({
+        id: uuid,
+        stripe_id: "pi_uuidtest",
+        customer_id: "cust-uuid-1",
+        amount: 1000,
+        status: "succeeded",
+        chain_id: "base",
+        token: "usdc",
+        tx_hash: "0xuuid_tx",
+        plan_id: "starter",
+        metadata: {},
+      }).select("*").single();
+
+      const res = await app.request(`/api/payment/${uuid}`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.payment.tx_hash).toBe("0xuuid_tx");
+
+      // Non-UUID, non-pi_, non-numeric ids still rejected
+      const bad = await app.request("/api/payment/not-a-valid-id");
+      expect(bad.status).toBe(400);
+    });
+  });
 });

@@ -131,6 +131,78 @@ export function createApp(injectedDb?: DB) {
     return expectedBuffer.length === actualBuffer.length && timingSafeEqual(expectedBuffer, actualBuffer);
   }
 
+  // ── Shared verification finalization (POST verify + GET lazy re-verify) ────
+  //
+  // Applies the same plan/top-up amount validation on both paths, marks the
+  // payment verified/failed, and fires the webhook callback when configured.
+  type VerificationContext = {
+    callbackUrl?: string;
+    plan?: string;
+    topup?: string;
+    tenantType?: string;
+    vmProvider?: string;
+    hostType?: string;
+    /** Signed checkout-intent amount (string, as signed). */
+    amountUsd?: string;
+    checkoutIntentVerified?: boolean;
+  };
+
+  async function finalizeVerifiedPayment(
+    paymentId: string,
+    result: { from: string; to: string; amountRaw: string; amountUsd: number; blockNumber?: number },
+    ctx: VerificationContext,
+  ): Promise<{ ok: true; payment: PaymentRecord | null } | { ok: false; error: string }> {
+    // Top-up flow (#29): require the on-chain amount to cover the pack price.
+    if (ctx.topup && ctx.topup in TOPUP_PRICES && result.amountUsd < TOPUP_PRICES[ctx.topup]) {
+      await markPaymentFailed(appDb, paymentId);
+      return { ok: false, error: `Underpaid: expected $${TOPUP_PRICES[ctx.topup]}, got $${result.amountUsd}` };
+    }
+
+    // Plan flow (main): resolve & validate the plan against the verified amount.
+    const planId = resolveplan(result.amountUsd, config.prices);
+    const signedAmountUsd = Number(ctx.amountUsd);
+    const matchesSignedIntentAmount = !!ctx.checkoutIntentVerified &&
+      !!ctx.plan &&
+      Number.isFinite(signedAmountUsd) &&
+      Math.abs(result.amountUsd - signedAmountUsd) < 0.01;
+    const verifiedPlanId = ctx.topup
+      ? undefined
+      : matchesSignedIntentAmount
+        ? ctx.plan
+        : planId;
+    if (!ctx.topup && ctx.plan && verifiedPlanId !== ctx.plan) {
+      await markPaymentFailed(appDb, paymentId);
+      return { ok: false, error: "Verified amount does not match requested plan" };
+    }
+    if (!ctx.topup && !verifiedPlanId) {
+      await markPaymentFailed(appDb, paymentId);
+      return { ok: false, error: "Verified amount does not match a supported plan" };
+    }
+
+    await markPaymentVerified(appDb, paymentId, {
+      fromAddress: result.from,
+      toAddress: result.to,
+      amountRaw: result.amountRaw,
+      amountUsd: result.amountUsd,
+      blockNumber: result.blockNumber,
+      planId: verifiedPlanId ?? undefined,
+    });
+
+    const verified = await getPaymentById(appDb, paymentId);
+
+    // ── Send webhook callback (fire-and-forget) ──
+    if (ctx.callbackUrl && config.callbackSecret && verified) {
+      sendCallback(ctx.callbackUrl, verified, {
+        topup: ctx.topup,
+        tenantType: ctx.tenantType,
+        vmProvider: ctx.vmProvider,
+        hostType: ctx.hostType,
+      }).catch((err) => console.error("Callback error:", err));
+    }
+
+    return { ok: true, payment: verified };
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   // LEGACY API (backward compatible)
   // ══════════════════════════════════════════════════════════════════════════
@@ -237,6 +309,20 @@ export function createApp(injectedDb?: DB) {
     }
 
     // ── Insert pending payment ──
+    // Persist the callback/verification context in payment_intents.metadata so
+    // the GET /api/payment/:id lazy re-verification path (SPA polling after a
+    // 202 pending) can run the same validation and send the same webhook
+    // callback as this POST path (OpenClawBot#3220).
+    const verificationContext: Record<string, unknown> = {
+      ...(body.callbackUrl ? { callbackUrl: body.callbackUrl } : {}),
+      ...(body.plan ? { plan: body.plan } : {}),
+      ...(body.topup ? { topup: body.topup } : {}),
+      ...(body.tenantType ? { tenantType: body.tenantType } : {}),
+      ...(body.vmProvider ? { vmProvider: body.vmProvider } : {}),
+      ...(body.hostType ? { hostType: body.hostType } : {}),
+      ...(body.amountUsd ? { amountUsd: body.amountUsd } : {}),
+      checkoutIntentVerified,
+    };
     let payment: PaymentRecord;
     try {
       payment = await insertPayment(appDb, {
@@ -249,6 +335,7 @@ export function createApp(injectedDb?: DB) {
         amountUsd: 0,
         planId: body.topup ? undefined : (body.plan ?? undefined),
         topupId: body.topup ?? undefined,
+        metadata: verificationContext,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -271,58 +358,23 @@ export function createApp(injectedDb?: DB) {
         return c.json({ payment: updated, error: "Transfer not found or not to our wallet" }, 400);
       }
 
-      // Top-up flow (#29): require the on-chain amount to cover the pack price.
-      if (body.topup && result.amountUsd < TOPUP_PRICES[body.topup]) {
-        await markPaymentFailed(appDb, payment.id);
-        const updated = await getPaymentById(appDb, payment.id);
-        return c.json({ payment: updated, error: `Underpaid: expected $${TOPUP_PRICES[body.topup]}, got $${result.amountUsd}` }, 400);
-      }
-
-      // Plan flow (main): resolve & validate the plan against the verified amount.
-      const planId = resolveplan(result.amountUsd, config.prices);
-      const signedAmountUsd = Number(body.amountUsd);
-      const matchesSignedIntentAmount = checkoutIntentVerified &&
-        body.plan &&
-        Number.isFinite(signedAmountUsd) &&
-        Math.abs(result.amountUsd - signedAmountUsd) < 0.01;
-      const verifiedPlanId = body.topup
-        ? undefined
-        : matchesSignedIntentAmount
-          ? body.plan
-          : planId;
-      if (!body.topup && body.plan && verifiedPlanId !== body.plan) {
-        await markPaymentFailed(appDb, payment.id);
-        return c.json({ error: "Verified amount does not match requested plan", payment: await getPaymentById(appDb, payment.id) }, 400);
-      }
-      if (!body.topup && !verifiedPlanId) {
-        await markPaymentFailed(appDb, payment.id);
-        return c.json({ error: "Verified amount does not match a supported plan", payment: await getPaymentById(appDb, payment.id) }, 400);
-      }
-
-      await markPaymentVerified(appDb, payment.id, {
-        fromAddress: result.from,
-        toAddress: result.to,
-        amountRaw: result.amountRaw,
-        amountUsd: result.amountUsd,
-        blockNumber: result.blockNumber,
-        planId: verifiedPlanId ?? undefined,
+      // Top-up / plan validation + verification + webhook callback — shared
+      // with the GET lazy re-verification path.
+      const outcome = await finalizeVerifiedPayment(payment.id, result, {
+        callbackUrl: body.callbackUrl,
+        plan: body.plan,
+        topup: body.topup,
+        tenantType: body.tenantType,
+        vmProvider: body.vmProvider,
+        hostType: body.hostType,
+        amountUsd: body.amountUsd,
+        checkoutIntentVerified,
       });
-
-      const verified = await getPaymentById(appDb, payment.id);
-
-      // ── Send webhook callback ──
-      if (body.callbackUrl && config.callbackSecret && verified) {
-        sendCallback(body.callbackUrl, verified, {
-          topup: body.topup,
-          tenantType: body.tenantType,
-          vmProvider: body.vmProvider,
-          hostType: body.hostType,
-        }).catch((err) =>
-          console.error("Callback error:", err),
-        );
+      if (!outcome.ok) {
+        return c.json({ error: outcome.error, payment: await getPaymentById(appDb, payment.id) }, 400);
       }
 
-      return c.json({ payment: verified });
+      return c.json({ payment: outcome.payment });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await markPaymentFailed(appDb, payment.id);
@@ -340,9 +392,15 @@ export function createApp(injectedDb?: DB) {
     // Admin callers may still pass x-api-key; it's accepted but not enforced here.
 
     const id = c.req.param("id");
-    // Legacy: try as a stripe_id (pi_...) or number
+    // Accept stripe_id ("pi_..."), UUID (payment_intents.id — what POST
+    // /api/payment returns and the /pay SPA polls with), or legacy numeric id.
+    // Regression #3220: this used to reject UUIDs ("Invalid payment ID" 400),
+    // which broke the SPA's pollPaymentVerified loop for any payment whose
+    // initial POST verify returned "pending" — the payment then never showed
+    // "Payment verified!" even after the tx confirmed on-chain.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const numId = Number(id);
-    if (!id.startsWith("pi_") && Number.isNaN(numId)) {
+    if (!id.startsWith("pi_") && !UUID_RE.test(id) && Number.isNaN(numId)) {
       return c.json({ error: "Invalid payment ID" }, 400);
     }
 
@@ -352,17 +410,24 @@ export function createApp(injectedDb?: DB) {
     // Lazy re-verification: if still pending, check the chain now.
     // This is what powers the frontend polling loop — the status transitions
     // from "pending" to "verified" (or "failed") on the first GET after mining.
+    // OpenClawBot#3220: this path must replicate POST's semantics — same
+    // plan/top-up amount validation, planId persistence, and webhook callback —
+    // using the server-persisted metadata (never client-supplied at poll time).
     if (payment.status === "pending" && payment.tx_hash && payment.chain_id) {
       try {
         const result = await verifyTransfer(payment.tx_hash, payment.chain_id as ChainId, config);
         if (result && result !== "pending") {
-          await markPaymentVerified(appDb, payment.id, {
-            fromAddress: result.from,
-            toAddress: result.to,
-            amountRaw: result.amountRaw,
-            amountUsd: result.amountUsd,
-            blockNumber: result.blockNumber,
-            planId: undefined,
+          const meta = (payment.metadata ?? {}) as Record<string, unknown>;
+          const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+          await finalizeVerifiedPayment(payment.id, result, {
+            callbackUrl: str(meta.callbackUrl),
+            plan: str(meta.plan) ?? payment.plan_id ?? undefined,
+            topup: str(meta.topup) ?? payment.topup_id ?? undefined,
+            tenantType: str(meta.tenantType),
+            vmProvider: str(meta.vmProvider),
+            hostType: str(meta.hostType),
+            amountUsd: str(meta.amountUsd),
+            checkoutIntentVerified: meta.checkoutIntentVerified === true,
           });
           payment = await getPaymentById(appDb, payment.id);
         }

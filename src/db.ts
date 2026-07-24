@@ -127,6 +127,8 @@ export interface PaymentRecord {
   to_address: string | null;
   block_number: number | null;
   created_at: string;
+  /** Server-persisted callback/verification context (payment_intents.metadata jsonb). */
+  metadata: Record<string, unknown>;
 }
 
 export interface InsertPayment {
@@ -142,6 +144,8 @@ export interface InsertPayment {
   fromAddress?: string;
   toAddress?: string;
   blockNumber?: number;
+  /** Server-persisted callback/verification context (stored in payment_intents.metadata jsonb). */
+  metadata?: Record<string, unknown>;
 }
 
 // ── Prefix ID generation (client-side fallback) ──────────────────────────────
@@ -682,6 +686,7 @@ export async function insertPayment(db: DB, p: InsertPayment): Promise<PaymentRe
     token: p.token,
     planId: p.planId,
     topupId: p.topupId,
+    metadata: p.metadata,
   });
 
   // Set tx_hash and metadata directly
@@ -778,5 +783,6 @@ function piToPaymentRecord(pi: PaymentIntentRecord, customer: CustomerRecord): P
     to_address: pi.to_address,
     block_number: pi.block_number,
     created_at: pi.created_at,
+    metadata: pi.metadata ?? {},
   };
 }
