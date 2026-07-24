@@ -13,7 +13,7 @@
  * Defaults to testnet/wallet-1.json (resolved relative to this script).
  *
  * Env overrides:
- *   AUSD_ADDRESS   aUSD contract (default 0x76B2AeC049e93FB53f210a4B0f02fe3Dee6514C3)
+ *   AUSD_ADDRESS   aUSD contract (default 0xfCCfda616e5107AC579712C5A461397f88e8e3f2)
  *   SEPOLIA_RPC    RPC URL       (default https://ethereum-sepolia-rpc.publicnode.com)
  *
  * <amount> is a human aUSD value (e.g. "100", "5.5"); it is scaled by 6 decimals.
@@ -36,7 +36,7 @@ import { sepolia } from "viem/chains";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const AUSD_ADDRESS = getAddress(
-  process.env.AUSD_ADDRESS ?? "0x76B2AeC049e93FB53f210a4B0f02fe3Dee6514C3",
+  process.env.AUSD_ADDRESS ?? "0xfCCfda616e5107AC579712C5A461397f88e8e3f2",
 );
 const RPC_URL =
   process.env.SEPOLIA_RPC ?? "https://ethereum-sepolia-rpc.publicnode.com";

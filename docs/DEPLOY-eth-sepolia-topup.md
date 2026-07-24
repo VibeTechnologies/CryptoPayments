@@ -6,7 +6,7 @@ Ethereum Sepolia) to prod, then proves it end-to-end.
 ## State (2026-06-26)
 - CryptoPayments PR #29 (branch `feat/topup-callback-field`, commit `3f6cc63`) — code done, Anvil E2E PASS, OPEN.
 - OpenClawBot PR #2417 (branch `fix/crypto-topup-litellm-userid`) — litellmUserId fallback so credits apply, OPEN.
-- agentUSD live on Ethereum Sepolia: `0x76B2AeC049e93FB53f210a4B0f02fe3Dee6514C3` (6 dec, owner-only mint).
+- agentUSD live on Ethereum Sepolia: `0xfCCfda616e5107AC579712C5A461397f88e8e3f2` (6 dec, owner-only mint).
 - Owner / payments recipient: `0xF08E2a9D128827615Fca921f278b7bFCBac895E2`.
 - Test wallet (holds 10k aUSD): `0x64cd33D639Cbb0b461c64ec989a7d9789d701a30` (key: Bitwarden "agentUSD testnet wallet").
 
@@ -62,7 +62,7 @@ Plus the DB password for `supabase link --project-ref krjbwbvmrpazdmmjstzo`.
    - Need a test tenant tg uid with active Pro/Max sub (topup gate requires litellmBudget>0).
    - a. Real aUSD transfer test wallet → owner on Sepolia (5 aUSD = "small" $5 → 5000000 units; confirm pack amount in config CREDIT_PACKS):
      ```bash
-     cast send 0x76B2AeC049e93FB53f210a4B0f02fe3Dee6514C3 \
+     cast send 0xfCCfda616e5107AC579712C5A461397f88e8e3f2 \
        "transfer(address,uint256)" \
        0xF08E2a9D128827615Fca921f278b7bFCBac895E2 5000000 \
        --private-key <test-wallet-key> \

@@ -11,7 +11,7 @@ Funded wallets and scripts for exercising the crypto-payments flow on **Ethereum
 | `testwallet.ts` | Generate a new `wallet-N.json` (+ QR). Run: `bun testnet/testwallet.ts`. |
 | `send-ausd.ts` | Send aUSD from a wallet file (below). |
 
-**agentUSD (aUSD):** ERC-20, **6 decimals**, contract `0x76B2AeC049e93FB53f210a4B0f02fe3Dee6514C3`.
+**agentUSD (aUSD):** ERC-20, **6 decimals**, contract `0xfCCfda616e5107AC579712C5A461397f88e8e3f2`.
 Payments recipient (eth_sepolia) is read live from the edge fn `/api/config`.
 
 ## send-ausd.ts

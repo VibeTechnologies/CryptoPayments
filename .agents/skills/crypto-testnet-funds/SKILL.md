@@ -9,7 +9,7 @@ On-chain test ops for CryptoPayments on **Ethereum Sepolia**. Testnet only — n
 
 ## Facts (verified)
 
-- **agentUSD (aUSD):** ERC-20, **6 decimals**, contract `0x76B2AeC049e93FB53f210a4B0f02fe3Dee6514C3` (`src/config.ts` tokens.eth_sepolia.ausd).
+- **agentUSD (aUSD):** ERC-20, **6 decimals**, contract `0xfCCfda616e5107AC579712C5A461397f88e8e3f2` (`src/config.ts` tokens.eth_sepolia.ausd).
 - **RPC:** `https://ethereum-sepolia-rpc.publicnode.com` (override with `SEPOLIA_RPC`).
 - **Funded wallet:** `testnet/wallet-1.json` = `0x64cd33D639Cbb0b461c64ec989a7d9789d701a30` (holds aUSD + Sepolia ETH for gas). Default sender for the send script.
 - **Owner/minter key:** `testnet/ownerkey.json` — owns the aUSD contract (can mint).
@@ -55,7 +55,7 @@ Minting new aUSD and (re)deploying the token use `testnet/ownerkey.json`. The mi
 ## Check balances
 
 ```bash
-~/.foundry/bin/cast call 0x76B2AeC049e93FB53f210a4B0f02fe3Dee6514C3 \
+~/.foundry/bin/cast call 0xfCCfda616e5107AC579712C5A461397f88e8e3f2 \
   "balanceOf(address)(uint256)" <addr> \
   --rpc-url https://ethereum-sepolia-rpc.publicnode.com   # raw, /1e6 = aUSD
 ~/.foundry/bin/cast balance <addr> --rpc-url https://ethereum-sepolia-rpc.publicnode.com  # ETH (wei)

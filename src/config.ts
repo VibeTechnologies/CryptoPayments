@@ -131,7 +131,7 @@ export const TOKEN_ADDRESSES: Record<ChainId, { usdt: string; usdc: string; ausd
   eth_sepolia: {
     usdt: "0x", // No official USDT on Ethereum Sepolia — placeholder
     usdc: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", // Circle testnet USDC on Eth Sepolia
-    ausd: "0x76B2AeC049e93FB53f210a4B0f02fe3Dee6514C3", // AgentUSD — deployed 2026-06-26
+    ausd: "0xfCCfda616e5107AC579712C5A461397f88e8e3f2", // AgentUSD — redeployed 2026-07-24 (owner key of prior 0x76B2AeC0... lost; deployer retains mint)
   },
 };
 
