@@ -715,6 +715,90 @@ describe("Server API", () => {
       expect(body.payment.plan_id).toBe("starter");
     });
 
+    // Regression: OpenClawBot#3583 — a signed `deploymentType` used to be
+    // dropped from this server's canonical string, so the HMAC could never
+    // match and the request 401'd. Because OpenClawBot signs deploymentType on
+    // EVERY Hermes checkout, every Hermes crypto purchase was unsettleable
+    // AFTER the customer's transfer had already been mined on-chain.
+    //
+    // This test fails with 401 if `deploymentType` is ever removed from the
+    // canonical set again.
+    it("accepts a signed checkout intent that includes deploymentType (#3583)", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        blockNumber: 123,
+        txHash: "0xsigned_intent_hermes_tx",
+      });
+
+      const checkout = buildSignedCheckoutBody({
+        plan: "starter",
+        uid: "42",
+        idtype: "tg",
+        amountUsd: "10.00",
+        exp: String(Math.floor(Date.now() / 1000) + 600),
+        hostType: "vps",
+        deploymentType: "hermes",
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xsigned_intent_hermes_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          amountUsd: checkout.amountUsd,
+          hostType: "vps",
+          deploymentType: "hermes",
+          exp: checkout.exp,
+          sig: checkout.sig,
+        }),
+      });
+
+      expect(res.status).not.toBe(401);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.payment.status).toBe("verified");
+    });
+
+    // The runtime selection must stay AUTHENTICATED. If deploymentType were
+    // merely echoed back unsigned, anyone could swap the delivered product
+    // after payment. A signature that omits it must not authorize it.
+    it("rejects deploymentType that was not covered by the signature (#3583)", async () => {
+      const checkout = buildSignedCheckoutBody({
+        plan: "starter",
+        uid: "42",
+        idtype: "tg",
+        amountUsd: "10.00",
+        exp: String(Math.floor(Date.now() / 1000) + 600),
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xunsigned_deployment_type_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          amountUsd: checkout.amountUsd,
+          deploymentType: "hermes",
+          exp: checkout.exp,
+          sig: checkout.sig,
+        }),
+      });
+
+      expect(res.status).toBe(401);
+    });
+
     it("rejects signed checkout amount mismatches", async () => {
       mockedVerifyTransfer.mockResolvedValueOnce({
         from: "0xSender",
