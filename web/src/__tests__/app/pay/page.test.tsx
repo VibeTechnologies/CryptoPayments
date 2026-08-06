@@ -32,7 +32,17 @@ vi.mock("@tonconnect/ui-react", () => ({
   TonConnectUIProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
-import { fetchConfig } from "@/lib/api";
+// Mock WalletConnect so tests can trigger the tx-sent callback directly,
+// exercising PayPage's submit wiring without driving a real wallet.
+vi.mock("@/components/wallet-connect", () => ({
+  WalletConnect: ({ onTxSent }: { onTxSent: (hash: string) => void }) => (
+    <button data-testid="mock-tx-sent" onClick={() => onTxSent("0xdeadbeef")}>
+      mock send
+    </button>
+  ),
+}));
+
+import { fetchConfig, submitPayment } from "@/lib/api";
 import PayPage from "@/app/pay/page";
 
 const mockConfig = {
@@ -209,5 +219,47 @@ describe("PayPage", () => {
     });
     expect(screen.getByText(/Alice/)).toBeInTheDocument();
     expect(screen.getByText(/Pro plan/)).toBeInTheDocument();
+  });
+  // Regression (OpenClawBot#3583): the signed checkout intent covers
+  // `deploymentType`. If the SPA drops it from the POST body, the server
+  // rebuilds the legacy canonical string, the HMAC diverges and the request
+  // 401s AFTER the buyer's transfer is already mined. Money taken, nothing
+  // provisioned. So the SPA must forward it verbatim from the query string.
+  it("forwards signed deploymentType from the URL into the payment request", async () => {
+    const user = userEvent.setup();
+    setUrlParams({
+      uid: "12345",
+      plan: "max",
+      idtype: "tg",
+      deploymentType: "hermes",
+      amountUsd: "100.00",
+      exp: "9999999999",
+      sig: "abc123",
+    });
+    vi.mocked(submitPayment).mockResolvedValue({ payment: { status: "verified", id: "p1" } } as any);
+
+    render(<PayPage />);
+    await waitFor(() => expect(screen.getByTestId("mock-tx-sent")).toBeInTheDocument());
+    await user.click(screen.getByTestId("mock-tx-sent"));
+
+    await waitFor(() => expect(submitPayment).toHaveBeenCalled());
+    expect(vi.mocked(submitPayment).mock.calls[0][0]).toMatchObject({
+      deploymentType: "hermes",
+      exp: "9999999999",
+      sig: "abc123",
+    });
+  });
+
+  it("omits deploymentType when the intent does not carry one (legacy openclaw)", async () => {
+    const user = userEvent.setup();
+    setUrlParams({ uid: "12345", plan: "max", idtype: "tg" });
+    vi.mocked(submitPayment).mockResolvedValue({ payment: { status: "verified", id: "p1" } } as any);
+
+    render(<PayPage />);
+    await waitFor(() => expect(screen.getByTestId("mock-tx-sent")).toBeInTheDocument());
+    await user.click(screen.getByTestId("mock-tx-sent"));
+
+    await waitFor(() => expect(submitPayment).toHaveBeenCalled());
+    expect(vi.mocked(submitPayment).mock.calls[0][0].deploymentType).toBeUndefined();
   });
 });

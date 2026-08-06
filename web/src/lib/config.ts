@@ -27,6 +27,8 @@ export interface PaymentRequest {
   tenantType?: "personal" | "team";
   vmProvider?: "azure" | "hetzner";
   hostType?: "vps";
+  /** Tenant runtime selector (openclaw | hermes). Covered by the intent signature. */
+  deploymentType?: string;
   amountUsd?: string;
   callbackUrl?: string;
   initData?: string;
