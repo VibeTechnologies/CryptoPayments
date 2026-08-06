@@ -98,6 +98,20 @@ export function createApp(injectedDb?: DB) {
     tenantType?: string;
     vmProvider?: string;
     hostType?: string;
+    /**
+     * Primary runtime requested at checkout ("openclaw" | "hermes").
+     *
+     * MUST be part of the canonical string. OpenClawBot's `buildCryptoCheckoutUrl`
+     * signs EVERY intent param including this one, so omitting it here produced a
+     * signature that could never match and 401'd the request — every Hermes
+     * purchase was unsettleable while the customer's on-chain transfer had
+     * already been mined (OpenClawBot#3583).
+     *
+     * It must also stay signed rather than being accepted unsigned: this field
+     * selects which runtime the buyer gets, so an unsigned copy would let anyone
+     * swap the delivered product after the fact.
+     */
+    deploymentType?: string;
     amountUsd?: string;
     exp?: string;
     sig?: string;
@@ -119,6 +133,7 @@ export function createApp(injectedDb?: DB) {
     }
     if (input.vmProvider) params.set("vmp", input.vmProvider);
     if (input.hostType) params.set("hostType", input.hostType);
+    if (input.deploymentType) params.set("deploymentType", input.deploymentType);
     const canonical = [...params.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([key, value]) => `${key}=${value}`)
@@ -142,6 +157,8 @@ export function createApp(injectedDb?: DB) {
     tenantType?: string;
     vmProvider?: string;
     hostType?: string;
+    /** Signed primary runtime ("openclaw" | "hermes"). */
+    deploymentType?: string;
     /** Signed checkout-intent amount (string, as signed). */
     amountUsd?: string;
     checkoutIntentVerified?: boolean;
@@ -197,6 +214,7 @@ export function createApp(injectedDb?: DB) {
         tenantType: ctx.tenantType,
         vmProvider: ctx.vmProvider,
         hostType: ctx.hostType,
+        deploymentType: ctx.deploymentType,
       }).catch((err) => console.error("Callback error:", err));
     }
 
@@ -238,6 +256,7 @@ export function createApp(injectedDb?: DB) {
       tenantType?: "personal" | "team";
       vmProvider?: "azure" | "hetzner";
       hostType?: "vps";
+      deploymentType?: "openclaw" | "hermes";
       amountUsd?: string;
       callbackUrl?: string;
       initData?: string;
@@ -320,6 +339,7 @@ export function createApp(injectedDb?: DB) {
       ...(body.tenantType ? { tenantType: body.tenantType } : {}),
       ...(body.vmProvider ? { vmProvider: body.vmProvider } : {}),
       ...(body.hostType ? { hostType: body.hostType } : {}),
+      ...(body.deploymentType ? { deploymentType: body.deploymentType } : {}),
       ...(body.amountUsd ? { amountUsd: body.amountUsd } : {}),
       checkoutIntentVerified,
     };
@@ -367,6 +387,7 @@ export function createApp(injectedDb?: DB) {
         tenantType: body.tenantType,
         vmProvider: body.vmProvider,
         hostType: body.hostType,
+        deploymentType: body.deploymentType,
         amountUsd: body.amountUsd,
         checkoutIntentVerified,
       });
@@ -426,6 +447,7 @@ export function createApp(injectedDb?: DB) {
             tenantType: str(meta.tenantType),
             vmProvider: str(meta.vmProvider),
             hostType: str(meta.hostType),
+            deploymentType: str(meta.deploymentType),
             amountUsd: str(meta.amountUsd),
             checkoutIntentVerified: meta.checkoutIntentVerified === true,
           });
@@ -805,6 +827,7 @@ async function sendCallback(
     tenantType?: string;
     vmProvider?: string;
     hostType?: string;
+    deploymentType?: string;
   } = {},
 ): Promise<void> {
   // SSRF guard: only POST to allowlisted HTTPS hosts.
@@ -841,6 +864,7 @@ async function sendCallback(
       ...(metadata.tenantType ? { tenantType: metadata.tenantType } : {}),
       ...(metadata.vmProvider ? { vmProvider: metadata.vmProvider } : {}),
       ...(metadata.hostType ? { hostType: metadata.hostType } : {}),
+      ...(metadata.deploymentType ? { deploymentType: metadata.deploymentType } : {}),
     },
     timestamp,
   });

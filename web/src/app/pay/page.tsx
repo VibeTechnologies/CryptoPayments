@@ -54,6 +54,7 @@ export default function PayPage() {
   const [tenantType, setTenantType] = useState<"personal" | "team" | "">("");
   const [vmProvider, setVmProvider] = useState<"azure" | "hetzner" | "">("");
   const [hostType, setHostType] = useState<"vps" | "">("");
+  const [deploymentType, setDeploymentType] = useState("");
   const [amountUsd, setAmountUsd] = useState("");
   const [intentExp, setIntentExp] = useState("");
   const [intentSig, setIntentSig] = useState("");
@@ -88,6 +89,7 @@ export default function PayPage() {
     const pTenantType = params.get("tenantType") || params.get("tenant") || "";
     const pVmProvider = params.get("vmp") || params.get("vmProvider") || "";
     const pHostType = params.get("hostType") || "";
+    const pDeploymentType = params.get("deploymentType") || "";
     const pAmountUsd = params.get("amountUsd") || "";
     const pExp = params.get("exp") || "";
     const pSig = params.get("sig") || "";
@@ -124,6 +126,7 @@ export default function PayPage() {
     setTenantType(pTenantType === "team" || pTenantType === "personal" ? pTenantType : "");
     setVmProvider(pVmProvider === "azure" || pVmProvider === "hetzner" ? pVmProvider : "");
     setHostType(pHostType === "vps" ? "vps" : "");
+    setDeploymentType(pDeploymentType);
     setAmountUsd(pAmountUsd);
     setIntentExp(pExp);
     setIntentSig(pSig);
@@ -204,7 +207,7 @@ export default function PayPage() {
       await doSubmit(hash);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedChain, selectedToken, idType, uid, plan, topup, callbackUrl, initData, tenantType, vmProvider, hostType, amountUsd, intentExp, intentSig],
+    [selectedChain, selectedToken, idType, uid, plan, topup, callbackUrl, initData, tenantType, vmProvider, hostType, deploymentType, amountUsd, intentExp, intentSig],
   );
 
   // Submit payment for verification
@@ -228,6 +231,7 @@ export default function PayPage() {
         tenantType: tenantType || undefined,
         vmProvider: vmProvider || undefined,
         hostType: hostType || undefined,
+        deploymentType: deploymentType || undefined,
         amountUsd: amountUsd || undefined,
         callbackUrl: callbackUrl || undefined,
         initData: initData || undefined,
