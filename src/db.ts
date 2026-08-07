@@ -535,6 +535,61 @@ export async function updatePaymentIntentStatus(
   return data as PaymentIntentRecord;
 }
 
+/**
+ * Persist the OUTCOME of a verified payment's webhook delivery.
+ *
+ * Why this exists: a payment could be `verified` while its callback was
+ * refused, failed, or never attempted, and NOTHING recorded that anywhere.
+ * `sendCallback` did a bare `fetch` and forgot; the crypto path has no
+ * callback_* columns; and `createWebhookEvent`/`webhook_events` is dead code
+ * that is never called. So "settled but never delivered" — money in, nothing
+ * out — was structurally invisible. That is how OpenClawBot#3600 survived.
+ *
+ * Written into the existing `payment_intents.metadata` jsonb deliberately: no
+ * schema migration, so this is safe to ship immediately on a live payments
+ * service. Promote to real columns later if it needs indexing.
+ *
+ * Never throws. Losing the audit write must not also lose the payment.
+ */
+export async function recordCallbackOutcome(
+  db: DB,
+  paymentIntentId: string,
+  callbackUrl: string | null,
+  failureReason: string | null,
+): Promise<void> {
+  try {
+    const column = paymentIntentId.startsWith("pi_") ? "stripe_id" : "id";
+    const { data } = await db
+      .from("payment_intents")
+      .select("metadata")
+      .eq(column, paymentIntentId)
+      .single();
+
+    const existing = ((data as { metadata?: Record<string, unknown> } | null)?.metadata ??
+      {}) as Record<string, unknown>;
+    const prior = (existing.callback_state ?? {}) as { attempts?: number };
+
+    const callbackState = {
+      url: callbackUrl,
+      status: failureReason ? "failed" : "delivered",
+      attempts: (typeof prior.attempts === "number" ? prior.attempts : 0) + 1,
+      delivered_at: failureReason ? null : new Date().toISOString(),
+      last_attempt_at: new Date().toISOString(),
+      last_error: failureReason,
+    };
+
+    await db
+      .from("payment_intents")
+      .update({ metadata: { ...existing, callback_state: callbackState } })
+      .eq(column, paymentIntentId);
+  } catch (err) {
+    console.error(
+      `[recordCallbackOutcome] failed to persist callback state for ${paymentIntentId}: ` +
+        (err instanceof Error ? err.message : String(err)),
+    );
+  }
+}
+
 // ── Checkout Sessions ────────────────────────────────────────────────────────
 
 export async function createCheckoutSession(

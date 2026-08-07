@@ -90,11 +90,22 @@ export function loadConfig(): Config {
     callbackSecret: env("CALLBACK_SECRET"),
     checkoutSecret: env("CHECKOUT_SECRET", env("CALLBACK_SECRET")),
     baseUrl: env("BASE_URL", "https://pay.openclaw.ai"),
-    // Sourced from docs/DEPLOY-eth-sepolia-topup.md: admin.openclaw.vibebrowser.app is the
-    // OpenClawBot webhook receiver; pay.agentlabs.cc is the payment-service domain.
+    // Hosts sendCallback is allowed to POST a verified-payment webhook to.
+    //
+    // MUST cover BOTH domain suffixes while the vibebrowser.app -> agentlabs.cc
+    // migration is in flight. OpenClawBot deploys with
+    // DOMAIN_SUFFIX=openclaw.agentlabs.cc, so it builds
+    // admin.openclaw.agentlabs.cc. That host was missing here, and the miss is
+    // SILENT — sendCallback logs a warning and returns, leaving the payment
+    // `verified` with no webhook, no retry and no record. The customer pays and
+    // receives nothing (OpenClawBot#3600).
+    //
+    // Do not prune an entry here just because it looks unused: this list is the
+    // only thing standing between a settled payment and a black hole, and
+    // nothing in either service detects a drop.
     callbackAllowlist: env(
       "CALLBACK_URL_ALLOWLIST",
-      "admin.openclaw.vibebrowser.app,pay.agentlabs.cc",
+      "admin.openclaw.agentlabs.cc,admin.openclaw.vibebrowser.app,pay.agentlabs.cc",
     ).split(",").map((s) => s.trim()).filter(Boolean),
   };
 }

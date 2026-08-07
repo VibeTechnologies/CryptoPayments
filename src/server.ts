@@ -34,6 +34,7 @@ import {
   completeCheckoutSession,
   listWebhookEvents,
   createWebhookEvent,
+  recordCallbackOutcome,
   type PaymentRecord,
 } from "./db.ts";
 import { verifyTransfer, resolveplan } from "./verify.ts";
@@ -208,6 +209,12 @@ export function createApp(injectedDb?: DB) {
     const verified = await getPaymentById(appDb, paymentId);
 
     // ── Send webhook callback (fire-and-forget) ──
+    // Record the delivery OUTCOME, do not just fire and forget.
+    //
+    // The old form was `.catch(err => console.error(...))`, so a refused or
+    // failing callback left a `verified` payment with no webhook and no trace —
+    // OpenClabBot#3600. `callback_state` is what makes
+    // "settled but never delivered" queryable, and therefore alertable.
     if (ctx.callbackUrl && config.callbackSecret && verified) {
       sendCallback(ctx.callbackUrl, verified, {
         topup: ctx.topup,
@@ -215,7 +222,20 @@ export function createApp(injectedDb?: DB) {
         vmProvider: ctx.vmProvider,
         hostType: ctx.hostType,
         deploymentType: ctx.deploymentType,
-      }).catch((err) => console.error("Callback error:", err));
+      })
+        .then(() => recordCallbackOutcome(appDb, paymentId, ctx.callbackUrl!, null))
+        .catch((err) => {
+          const reason = err instanceof Error ? err.message : String(err);
+          console.error(`[PAYMENT-LOST] payment ${paymentId} verified but callback failed: ${reason}`);
+          return recordCallbackOutcome(appDb, paymentId, ctx.callbackUrl!, reason);
+        });
+    } else if (verified && !ctx.callbackUrl) {
+      // No callback at all on a verified payment is also money-in-nothing-out.
+      console.error(
+        `[PAYMENT-LOST] payment ${paymentId} is VERIFIED but carried NO callbackUrl — ` +
+          `nothing will ever be provisioned for it.`,
+      );
+      await recordCallbackOutcome(appDb, paymentId, null, "no callbackUrl on the intent");
     }
 
     return { ok: true, payment: verified };
@@ -806,6 +826,21 @@ export function createApp(injectedDb?: DB) {
 
 // ── Webhook callback ─────────────────────────────────────────────────────────
 
+/**
+ * A verified payment whose webhook could not be delivered.
+ *
+ * Exists so an undelivered callback is a THROW rather than a silent `return`.
+ * OpenClawBot#3600 survived precisely because every failure path here was a
+ * warn-and-continue: the payment stayed `verified`, the customer got nothing,
+ * and no signal existed anywhere to notice.
+ */
+export class CallbackNotDeliverableError extends Error {
+  constructor(reason: string) {
+    super(`callback not deliverable: ${reason}`);
+    this.name = "CallbackNotDeliverableError";
+  }
+}
+
 /** Compute HMAC-SHA256 using the Web Crypto API */
 async function hmacSha256Hex(secret: string, message: string): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -843,8 +878,21 @@ async function sendCallback(
     return;
   }
   if (!config.callbackAllowlist.includes(parsedUrl.hostname)) {
-    console.warn(`[SECURITY] sendCallback: host not in allowlist — skipping: ${parsedUrl.hostname}`);
-    return;
+    // A settled payment whose webhook is dropped is money in with nothing out.
+    // This used to be console.warn + return, which is why OpenClawBot#3600
+    // survived: the payment stayed `verified`, no webhook fired, no retry
+    // existed, and NOTHING recorded that a delivery had been refused. Keep the
+    // SSRF guard — it is correct — but make the drop impossible to miss.
+    console.error(
+      `[PAYMENT-LOST] sendCallback REFUSED for payment ${payment.id}: host ` +
+        `"${parsedUrl.hostname}" is not in CALLBACK_URL_ALLOWLIST ` +
+        `(${config.callbackAllowlist.join(", ")}). The payment is VERIFIED but the ` +
+        `customer will receive NOTHING and there is no retry. Add the host to ` +
+        `CALLBACK_URL_ALLOWLIST, or stop the caller from signing intents for it.`,
+    );
+    throw new CallbackNotDeliverableError(
+      `callback host "${parsedUrl.hostname}" is not allowlisted`,
+    );
   }
 
   const timestamp = Math.floor(Date.now() / 1000).toString();
@@ -882,10 +930,16 @@ async function sendCallback(
   });
 
   if (!resp.ok) {
-    console.error(`Callback to ${callbackUrl} failed: ${resp.status} ${resp.statusText}`);
-  } else {
-    console.log(`Callback sent for payment ${payment.id}`);
+    console.error(
+      `[PAYMENT-LOST] Callback to ${callbackUrl} FAILED for payment ${payment.id}: ` +
+        `${resp.status} ${resp.statusText}. The payment is VERIFIED but the customer ` +
+        `will receive NOTHING until this is redelivered.`,
+    );
+    throw new CallbackNotDeliverableError(
+      `callback POST returned ${resp.status} ${resp.statusText}`,
+    );
   }
+  console.log(`Callback sent for payment ${payment.id}`);
 }
 
 // ── Module exports ───────────────────────────────────────────────────────────
