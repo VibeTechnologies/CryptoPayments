@@ -2,7 +2,18 @@ import { Hono, type Context } from "hono";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { cors } from "hono/cors";
-import { loadConfig, type ChainId, type TokenId, TOKEN_ADDRESSES } from "./config.ts";
+import {
+  loadConfig,
+  productConfig,
+  productConfigOrDefault,
+  UnknownProductError,
+  configForProduct,
+  DEFAULT_PRODUCT,
+  type Config,
+  type ChainId,
+  type TokenId,
+  TOKEN_ADDRESSES,
+} from "./config.ts";
 import {
   createDB,
   type DB,
@@ -35,15 +46,94 @@ import {
   listWebhookEvents,
   createWebhookEvent,
   recordCallbackOutcome,
+  recordCallbackAttempt,
+  listDueCallbacks,
   type PaymentRecord,
+  type PaymentIntentRecord,
 } from "./db.ts";
+import {
+  buildSignedPayload,
+  type AttemptOutcome,
+  type CallbackDeliveryState,
+} from "./callback-delivery.ts";
 import { verifyTransfer, resolveplan } from "./verify.ts";
 import { verifyTelegramInitData } from "./telegram.ts";
 
 const config = loadConfig();
 const db = createDB(config.supabaseUrl, config.supabaseKey);
 
-const TOPUP_PRICES: Record<string, number> = { small: 5, medium: 10, large: 25 };
+/**
+ * Top-up pack prices for the DEFAULT product. Kept as a module constant only
+ * for validating pack NAMES; the price actually charged is read per-product
+ * from `productConfig(config, product).topupPrices`.
+ */
+const TOPUP_PRICES: Record<string, number> = productConfig(config, DEFAULT_PRODUCT).topupPrices;
+
+/**
+ * Build the signed fields of a checkout intent as `[key, value]` pairs sorted
+ * by key. Shared by the signing and verifying paths so the two can never drift.
+ */
+export function buildIntentFields(input: {
+  uid: string;
+  idType?: string;
+  plan?: string;
+  topup?: string;
+  callbackUrl?: string;
+  tenantType?: string;
+  vmProvider?: string;
+  hostType?: string;
+  deploymentType?: string;
+  product?: string;
+  amountUsd?: string;
+  exp?: string;
+}): Array<[string, string]> {
+  const params = new URLSearchParams();
+  if (input.plan) params.set("plan", input.plan);
+  if (input.topup) params.set("topup", input.topup);
+  params.set("uid", input.uid);
+  params.set("idtype", input.idType || "tg");
+  if (input.amountUsd) params.set("amountUsd", input.amountUsd);
+  if (input.exp) params.set("exp", input.exp);
+  if (input.callbackUrl) params.set("callback", input.callbackUrl);
+  if (input.tenantType) {
+    params.set("tenantType", input.tenantType);
+    params.set("tenant", input.tenantType);
+  }
+  if (input.vmProvider) params.set("vmp", input.vmProvider);
+  if (input.hostType) params.set("hostType", input.hostType);
+  if (input.deploymentType) params.set("deploymentType", input.deploymentType);
+  if (input.product) params.set("product", input.product);
+  return [...params.entries()].sort(([a], [b]) => a.localeCompare(b));
+}
+
+/**
+ * Canonical string signed by the checkout-intent HMAC.
+ *
+ * Length-prefixed on BOTH key and value:
+ *
+ *     <keyLen>:<key>=<valueLen>:<value>   joined by "\n"
+ *
+ * e.g. `{plan:"starter", product:"vibe"}` =>
+ *     "4:plan=7:starter\n7:product=4:vibe"
+ *
+ * The length prefix makes a field boundary unforgeable: a reader knows exactly
+ * how many characters a value occupies before it looks for the next separator,
+ * so no character a value can contain — "\n", "=", ":" — can fabricate,
+ * truncate or absorb a neighbouring field.
+ *
+ * The previous form was a bare `${key}=${value}` join on "\n". Because
+ * `URLSearchParams.entries()` returns DECODED values, a raw newline inside a
+ * value passed straight through, and
+ *
+ *     {plan: "starter\nproduct=vibe"}
+ *
+ * canonicalized byte-identically to `{plan:"starter", product:"vibe"}` —
+ * `plan` sorts immediately before `product` — forging the `product` field that
+ * selects the price table, receiving wallet and callback allowlist.
+ */
+export function canonicalIntentString(fields: Array<[string, string]>): string {
+  return fields.map(([key, value]) => `${key.length}:${key}=${value.length}:${value}`).join("\n");
+}
 
 /**
  * Constant-time string comparison to prevent timing-based API key leaks.
@@ -81,6 +171,143 @@ export function createApp(injectedDb?: DB) {
     console.log(`${c.req.method} ${c.req.path} ${c.res.status} ${ms}ms`);
   });
 
+  // ── Opportunistic redelivery ────────────────────────────────────────────────
+  //
+  // THE SCHEDULER. A Supabase Edge Function is request-scoped: there is no
+  // process that outlives the response, so `setTimeout(retry, 60_000)` is
+  // silently dropped when the isolate is torn down. The only reliable clock we
+  // have is "another request arrived". So every inbound request opportunistically
+  // drains callbacks whose `next_attempt_at` has passed.
+  //
+  // Cheap by construction: `listDueCallbacks` returns [] unless a consumer is
+  // actually broken, and the drain is throttled to once per
+  // DRAIN_INTERVAL_MS per isolate so a burst of traffic cannot stampede a
+  // struggling consumer. It runs AFTER the response is produced and never
+  // rejects, so it can never affect the request that triggered it.
+  app.use("*", async (c, next) => {
+    await next();
+    if (c.req.path.startsWith("/api/admin/")) return; // admin drain is explicit
+    void maybeDrain();
+  });
+
+  const DRAIN_INTERVAL_MS = 15_000;
+  let lastDrainAt = 0;
+  let draining = false;
+
+  async function maybeDrain(): Promise<void> {
+    const now = Date.now();
+    if (draining || now - lastDrainAt < DRAIN_INTERVAL_MS) return;
+    draining = true;
+    lastDrainAt = now;
+    try {
+      await drainDueCallbacks();
+    } catch (err) {
+      console.error(`[callback-drain] failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      draining = false;
+    }
+  }
+
+  /**
+   * Retry every callback that is `pending` and due.
+   *
+   * Idempotent and safe to run concurrently with itself: `computeNextState`
+   * refuses to regress a `delivered` state, and a duplicate successful delivery
+   * is collapsed by the consumer's txHash dedupe.
+   */
+  async function drainDueCallbacks(
+    nowMs: number = Date.now(),
+  ): Promise<{ attempted: number; delivered: number; failed: number }> {
+    const due = await listDueCallbacks(appDb, nowMs);
+    let delivered = 0;
+    let failed = 0;
+
+    for (const pi of due) {
+      const meta = (pi.metadata ?? {}) as Record<string, unknown>;
+      const state = (meta.callback_state ?? {}) as Partial<CallbackDeliveryState>;
+      const url = state.url;
+      if (!url) continue;
+
+      const payment = await getPaymentById(appDb, pi.stripe_id);
+      if (!payment) continue;
+
+      const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+      let prod: ReturnType<typeof productConfig>;
+      try {
+        prod = productConfig(config, str(meta.product));
+      } catch {
+        // The product was removed from config while a delivery was pending.
+        // Retrying can never succeed — go terminal loudly rather than loop.
+        const outcome: AttemptOutcome = {
+          ok: false,
+          error: `unknown product "${String(meta.product)}" — cannot resolve callback allowlist`,
+          permanent: true,
+        };
+        const next = await recordCallbackAttempt(appDb, pi.stripe_id, url, outcome, nowMs);
+        logDeliveryOutcome(pi.stripe_id, payment.tx_hash, url, outcome, next);
+        failed++;
+        continue;
+      }
+
+      const outcome = await attemptCallback(
+        url,
+        payment,
+        {
+          topup: str(meta.topup),
+          tenantType: str(meta.tenantType),
+          vmProvider: str(meta.vmProvider),
+          hostType: str(meta.hostType),
+          deploymentType: str(meta.deploymentType),
+          product: prod.id,
+        },
+        prod.callbackAllowlist,
+      );
+      const next = await recordCallbackAttempt(appDb, pi.stripe_id, url, outcome, nowMs);
+      logDeliveryOutcome(pi.stripe_id, payment.tx_hash, url, outcome, next);
+      if (outcome.ok) delivered++;
+      else failed++;
+    }
+
+    return { attempted: due.length, delivered, failed };
+  }
+
+  /**
+   * Operator escape hatch: force a redelivery sweep NOW.
+   *
+   * Exists because the opportunistic drain only advances when traffic arrives —
+   * on a quiet night a stuck payment could sit until morning. Guarded by the
+   * same API key the bot already uses.
+   */
+  app.post("/api/admin/callbacks/redeliver", async (c) => {
+    if (!requireApiKey(c)) return c.json({ error: "Unauthorized" }, 401);
+    const result = await drainDueCallbacks();
+    return c.json({ ok: true, ...result });
+  });
+
+  /** Operator view: verified payments that are stuck or needing attention. */
+  app.get("/api/admin/callbacks/stuck", async (c) => {
+    if (!requireApiKey(c)) return c.json({ error: "Unauthorized" }, 401);
+    const pis = await listPaymentIntents(appDb, { limit: 200 });
+    const stuck = pis
+      .map((pi) => ({
+        pi,
+        state: ((pi.metadata ?? {}) as Record<string, unknown>).callback_state as
+          | Partial<CallbackDeliveryState>
+          | undefined,
+      }))
+      .filter(({ state }) => state && state.status !== "delivered")
+      .map(({ pi, state }) => ({
+        paymentId: pi.stripe_id,
+        txHash: pi.tx_hash,
+        status: state?.status ?? null,
+        attempts: state?.attempts ?? 0,
+        nextAttemptAt: state?.next_attempt_at ?? null,
+        terminalReason: state?.terminal_reason ?? null,
+        lastError: state?.last_error ?? null,
+      }));
+    return c.json({ count: stuck.length, stuck });
+  });
+
   // ── API key auth middleware helper ─────────────────────────────────────────
 
   function requireApiKey(c: Context): boolean {
@@ -113,38 +340,101 @@ export function createApp(injectedDb?: DB) {
      * swap the delivered product after the fact.
      */
     deploymentType?: string;
+    /**
+     * Product being purchased ("openclaw" | "vibe" | ...).
+     *
+     * MUST be inside the canonical string. `product` selects the price table,
+     * the receiving wallet and the callback allowlist, so an unsigned copy would
+     * let an attacker pay product A's cheap price and be credited product B's
+     * expensive plan — the same class of bug as the unsigned `deploymentType`
+     * in OpenClawBot#3583, where a purchase-shaping field sat outside the
+     * signature.
+     *
+     * It is only appended when present, so a legacy intent (no `product`)
+     * produces the byte-identical canonical string it produced before this
+     * field existed, and keeps validating.
+     */
+    product?: string;
     amountUsd?: string;
+    /** Identifier namespace for `uid` ("tg" | "email"). Part of the canonical string. */
+    idType?: string;
     exp?: string;
     sig?: string;
   }): boolean {
     if (!config.checkoutSecret || !input.exp || !input.sig) return false;
     const exp = Number(input.exp);
     if (!Number.isFinite(exp) || exp < Math.floor(Date.now() / 1000)) return false;
-    const params = new URLSearchParams();
-    if (input.plan) params.set("plan", input.plan);
-    if (input.topup) params.set("topup", input.topup);
-    params.set("uid", input.uid);
-    params.set("idtype", "tg");
-    if (input.amountUsd) params.set("amountUsd", input.amountUsd);
-    params.set("exp", input.exp);
-    if (input.callbackUrl) params.set("callback", input.callbackUrl);
-    if (input.tenantType) {
-      params.set("tenantType", input.tenantType);
-      params.set("tenant", input.tenantType);
-    }
-    if (input.vmProvider) params.set("vmp", input.vmProvider);
-    if (input.hostType) params.set("hostType", input.hostType);
-    if (input.deploymentType) params.set("deploymentType", input.deploymentType);
-    const canonical = [...params.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, value]) => `${key}=${value}`)
-      .join("\n");
-    const expected = createHmac("sha256", config.checkoutSecret)
-      .update(canonical)
+
+    // `idtype` used to be hardcoded to "tg", which made the signed-intent auth
+    // path unusable for `email` identities (i.e. for the vibe product), forcing
+    // vibe onto the apiKey path where `product` is unsigned. It is now taken
+    // from the request and covered by the signature.
+    const idType = input.idType || "tg";
+
+    const fields = buildIntentFields({ ...input, idType });
+    const expectedNew = createHmac("sha256", config.checkoutSecret)
+      .update(canonicalIntentString(fields))
       .digest("hex");
-    const expectedBuffer = Buffer.from(expected);
-    const actualBuffer = Buffer.from(input.sig);
-    return expectedBuffer.length === actualBuffer.length && timingSafeEqual(expectedBuffer, actualBuffer);
+    if (timingSafeEqualStr(expectedNew, input.sig)) return true;
+
+    // ── Legacy canonical form (DEPRECATED) ────────────────────────────────
+    //
+    // Live OpenClawBot production signs with the old `k=v` + "\n" join, which
+    // is forgeable: `URLSearchParams.entries()` returns DECODED values, so a
+    // value containing a raw "\n" (or "=") can fabricate an extra field —
+    // e.g. `{plan:"starter\nproduct=vibe"}` canonicalizes byte-identically to
+    // `{plan:"starter", product:"vibe"}`, forging `product`.
+    //
+    // We keep accepting it ONLY for in-flight/legacy intents, and only when the
+    // injection vector is structurally absent: no value may contain a line
+    // break (see the guard below for why "=" is deliberately allowed).
+    //
+    // Legacy signers always emitted idtype=tg, so a legacy signature can never
+    // authorise an `email` identity — accepting one would let a tg-signed
+    // intent be credited to the same uid in the email namespace.
+    //
+    // TODO(remove-legacy-canonical): delete this branch once no signature
+    // produced by the pre-length-prefix algorithm can still be within its
+    // `exp` window — i.e. once every OpenClawBot deployment emitting the old
+    // format has been upgraded AND the longest checkout-intent TTL (30 min)
+    // has elapsed since that rollout completed.
+    if (idType !== "tg") return false;
+
+    // A legacy signature can never authorise a `product`. Legacy signers
+    // predate multi-product and never emitted the field, so a genuine legacy
+    // intent has no `product`. This is load-bearing, not merely tidy: the
+    // newline collision below is INDISTINGUISHABLE on the legacy path when
+    // replayed in its split form — a signature over
+    //   {plan: "starter\nproduct=vibe"}
+    // produces byte-identical legacy canonical bytes to
+    //   {plan: "starter", product: "vibe"}
+    // and the split form contains no "\n" for the value guard to catch.
+    // Refusing `product` outright on the legacy path removes the only field
+    // the collision can profitably forge (wallet / price table / allowlist).
+    if (input.product) return false;
+
+    // Guard the injection vector ONLY.
+    //
+    // The legacy encoding is `${key}=${value}` joined by "\n". To forge a field
+    // an attacker must start a NEW LINE inside a value, which requires "\n"
+    // (and "\r" is rejected with it, defensively, so no CR-normalizing layer
+    // between signer and verifier can manufacture one).
+    //
+    // "=" is NOT rejected. It cannot shift a field boundary here: the legacy
+    // string is never PARSED — it is recomputed from `buildIntentFields`, whose
+    // key set is a fixed hardcoded list ("plan", "uid", "idtype", "callback",
+    // …). Forging via "=" would require a key like `plan=a` to exist, and no
+    // such key can ever be produced. Rejecting "=" bought nothing and broke a
+    // real case: `buildIntentFields` puts the DECODED callbackUrl into the
+    // string, so ANY legacy intent whose callback carries a query string
+    // (`?a=b`) started 401'ing — a brand-new failure mode on the very branch
+    // whose purpose is to keep in-flight production intents working.
+    const legacyFields = buildIntentFields({ ...input, idType: "tg" });
+    if (legacyFields.some(([, value]) => value.includes("\n") || value.includes("\r"))) return false;
+    const expectedLegacy = createHmac("sha256", config.checkoutSecret)
+      .update(legacyFields.map(([key, value]) => `${key}=${value}`).join("\n"))
+      .digest("hex");
+    return timingSafeEqualStr(expectedLegacy, input.sig);
   }
 
   // ── Shared verification finalization (POST verify + GET lazy re-verify) ────
@@ -160,6 +450,8 @@ export function createApp(injectedDb?: DB) {
     hostType?: string;
     /** Signed primary runtime ("openclaw" | "hermes"). */
     deploymentType?: string;
+    /** Signed product id. Absent => DEFAULT_PRODUCT ("openclaw"). */
+    product?: string;
     /** Signed checkout-intent amount (string, as signed). */
     amountUsd?: string;
     checkoutIntentVerified?: boolean;
@@ -170,14 +462,18 @@ export function createApp(injectedDb?: DB) {
     result: { from: string; to: string; amountRaw: string; amountUsd: number; blockNumber?: number },
     ctx: VerificationContext,
   ): Promise<{ ok: true; payment: PaymentRecord | null } | { ok: false; error: string }> {
+    const product = productConfig(config, ctx.product);
+
     // Top-up flow (#29): require the on-chain amount to cover the pack price.
-    if (ctx.topup && ctx.topup in TOPUP_PRICES && result.amountUsd < TOPUP_PRICES[ctx.topup]) {
+    const topupPrices = product.topupPrices;
+    if (ctx.topup && ctx.topup in topupPrices && result.amountUsd < topupPrices[ctx.topup]) {
       await markPaymentFailed(appDb, paymentId);
-      return { ok: false, error: `Underpaid: expected $${TOPUP_PRICES[ctx.topup]}, got $${result.amountUsd}` };
+      return { ok: false, error: `Underpaid: expected $${topupPrices[ctx.topup]}, got $${result.amountUsd}` };
     }
 
-    // Plan flow (main): resolve & validate the plan against the verified amount.
-    const planId = resolveplan(result.amountUsd, config.prices);
+    // Plan flow (main): resolve & validate the plan against the verified amount,
+    // against THIS product's price table only.
+    const planId = resolveplan(result.amountUsd, config, ctx.product);
     const signedAmountUsd = Number(ctx.amountUsd);
     const matchesSignedIntentAmount = !!ctx.checkoutIntentVerified &&
       !!ctx.plan &&
@@ -208,29 +504,34 @@ export function createApp(injectedDb?: DB) {
 
     const verified = await getPaymentById(appDb, paymentId);
 
-    // ── Send webhook callback (fire-and-forget) ──
-    // Record the delivery OUTCOME, do not just fire and forget.
+    // ── Send webhook callback ──
     //
-    // The old form was `.catch(err => console.error(...))`, so a refused or
-    // failing callback left a `verified` payment with no webhook and no trace —
-    // OpenClabBot#3600. `callback_state` is what makes
-    // "settled but never delivered" queryable, and therefore alertable.
+    // Attempt ONCE inline, then persist the outcome so a failure is durable and
+    // REDELIVERABLE. Before this, a 5xx or a brief consumer outage meant the
+    // money was taken on-chain and the customer got nothing, forever, with only
+    // a log line. `callback_state` now carries attempts / next_attempt_at /
+    // terminal status, and `drainDueCallbacks` (below) retries it on a later
+    // request — the only scheduler a request-scoped Edge Function can have.
     if (ctx.callbackUrl && config.callbackSecret && verified) {
-      sendCallback(ctx.callbackUrl, verified, {
-        topup: ctx.topup,
-        tenantType: ctx.tenantType,
-        vmProvider: ctx.vmProvider,
-        hostType: ctx.hostType,
-        deploymentType: ctx.deploymentType,
-      })
-        .then(() => recordCallbackOutcome(appDb, paymentId, ctx.callbackUrl!, null))
-        .catch((err) => {
-          const reason = err instanceof Error ? err.message : String(err);
-          console.error(`[PAYMENT-LOST] payment ${paymentId} verified but callback failed: ${reason}`);
-          return recordCallbackOutcome(appDb, paymentId, ctx.callbackUrl!, reason);
-        });
+      const outcome = await attemptCallback(
+        ctx.callbackUrl,
+        verified,
+        {
+          topup: ctx.topup,
+          tenantType: ctx.tenantType,
+          vmProvider: ctx.vmProvider,
+          hostType: ctx.hostType,
+          deploymentType: ctx.deploymentType,
+          product: product.id,
+        },
+        product.callbackAllowlist,
+      );
+      const state = await recordCallbackAttempt(appDb, paymentId, ctx.callbackUrl, outcome);
+      logDeliveryOutcome(paymentId, verified.tx_hash, ctx.callbackUrl, outcome, state);
     } else if (verified && !ctx.callbackUrl) {
       // No callback at all on a verified payment is also money-in-nothing-out.
+      // Nothing to retry — there is no address to retry TO — so it goes
+      // straight to the terminal `needs_attention` state an operator watches.
       console.error(
         `[PAYMENT-LOST] payment ${paymentId} is VERIFIED but carried NO callbackUrl — ` +
           `nothing will ever be provisioned for it.`,
@@ -254,9 +555,24 @@ export function createApp(injectedDb?: DB) {
   // ── Public config ──────────────────────────────────────────────────────────
 
   app.get("/api/config", (c) => {
+    // `?product=` scopes wallets/prices to that product. Absent => openclaw,
+    // so the existing SPA sees exactly what it saw before.
+    // Unknown product must not silently resolve to openclaw's wallets/prices:
+    // the SPA reads this to decide WHERE TO SEND FUNDS.
+    let p: ReturnType<typeof productConfig>;
+    try {
+      p = productConfig(config, c.req.query("product"));
+    } catch {
+      return c.json({ error: `Unknown product: ${c.req.query("product")}` }, 400);
+    }
     return c.json({
-      wallets: config.wallets,
-      prices: config.prices,
+      product: p.id,
+      productName: p.name,
+      productIconUrl: p.iconUrl,
+      products: Object.keys(config.products),
+      wallets: p.wallets,
+      prices: p.prices,
+      topupPrices: p.topupPrices,
       tokens: TOKEN_ADDRESSES,
       chains: ["base", "eth", "arbitrum", "ton", "sol", "base_sepolia", "eth_sepolia"],
     });
@@ -277,6 +593,8 @@ export function createApp(injectedDb?: DB) {
       vmProvider?: "azure" | "hetzner";
       hostType?: "vps";
       deploymentType?: "openclaw" | "hermes";
+      /** Product being paid for. Absent => "openclaw" (backward compatible). */
+      product?: string;
       amountUsd?: string;
       callbackUrl?: string;
       initData?: string;
@@ -341,6 +659,14 @@ export function createApp(injectedDb?: DB) {
       return c.json({ error: "topup must be small, medium, or large" }, 400);
     }
 
+    // Unknown product ids are rejected rather than silently coerced to
+    // `openclaw`: a typo'd product must not be settled at another product's
+    // prices. Absent is fine and means `openclaw`.
+    if (body.product !== undefined && !(body.product in config.products)) {
+      return c.json({ error: `Unknown product: ${body.product}` }, 400);
+    }
+    const productId = productConfig(config, body.product).id;
+
     // ── Duplicate check ──
     const existing = await getPaymentByTx(appDb, body.txHash, body.chainId);
     if (existing) {
@@ -360,6 +686,7 @@ export function createApp(injectedDb?: DB) {
       ...(body.vmProvider ? { vmProvider: body.vmProvider } : {}),
       ...(body.hostType ? { hostType: body.hostType } : {}),
       ...(body.deploymentType ? { deploymentType: body.deploymentType } : {}),
+      ...(body.product ? { product: body.product } : {}),
       ...(body.amountUsd ? { amountUsd: body.amountUsd } : {}),
       checkoutIntentVerified,
     };
@@ -384,7 +711,7 @@ export function createApp(injectedDb?: DB) {
 
     // ── Verify on-chain ──
     try {
-      const result = await verifyTransfer(body.txHash, body.chainId, config);
+      const result = await verifyTransfer(body.txHash, body.chainId, configForProduct(config, productId));
 
       if (result === "pending") {
         // TX not yet mined or not enough confirmations — leave payment as pending, caller retries
@@ -408,6 +735,7 @@ export function createApp(injectedDb?: DB) {
         vmProvider: body.vmProvider,
         hostType: body.hostType,
         deploymentType: body.deploymentType,
+        product: productId,
         amountUsd: body.amountUsd,
         checkoutIntentVerified,
       });
@@ -456,7 +784,31 @@ export function createApp(injectedDb?: DB) {
     // using the server-persisted metadata (never client-supplied at poll time).
     if (payment.status === "pending" && payment.tx_hash && payment.chain_id) {
       try {
-        const result = await verifyTransfer(payment.tx_hash, payment.chain_id as ChainId, config);
+        const meta0 = (payment.metadata ?? {}) as Record<string, unknown>;
+        const metaProduct = typeof meta0.product === "string" ? meta0.product : undefined;
+        // Re-validate the stored product on THIS path too. `productConfig` now
+        // throws for an unknown id instead of coercing to openclaw, so removing
+        // a product from `PRODUCTS` while payments are pending can no longer
+        // silently re-verify them against openclaw's wallet and price table.
+        // Rethrown out of the surrounding try/catch would be swallowed as a
+        // transient RPC error, so it is surfaced explicitly as a 409 instead.
+        let scopedConfig: Config;
+        try {
+          scopedConfig = configForProduct(config, metaProduct);
+        } catch (e) {
+          if (e instanceof UnknownProductError) {
+            return c.json(
+              { error: `Unknown product: ${e.productId}`, payment },
+              409,
+            );
+          }
+          throw e;
+        }
+        const result = await verifyTransfer(
+          payment.tx_hash,
+          payment.chain_id as ChainId,
+          scopedConfig,
+        );
         if (result && result !== "pending") {
           const meta = (payment.metadata ?? {}) as Record<string, unknown>;
           const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
@@ -468,6 +820,7 @@ export function createApp(injectedDb?: DB) {
             vmProvider: str(meta.vmProvider),
             hostType: str(meta.hostType),
             deploymentType: str(meta.deploymentType),
+            product: str(meta.product),
             amountUsd: str(meta.amountUsd),
             checkoutIntentVerified: meta.checkoutIntentVerified === true,
           });
@@ -800,10 +1153,12 @@ export function createApp(injectedDb?: DB) {
   // ── TonConnect manifest (required for TON wallet integration) ─────────────
   app.get("/tonconnect-manifest.json", (c) => {
     const baseUrl = config.baseUrl || `${c.req.url.split("/tonconnect")[0]}`;
+    // Cosmetic only (name/icon) — an unknown id must not 500 the manifest.
+    const brand = productConfigOrDefault(config, c.req.query("product"));
     return c.json({
       url: baseUrl,
-      name: "OpenClaw Crypto Payments",
-      iconUrl: "https://openclaw.ai/favicon.ico",
+      name: brand.name,
+      iconUrl: brand.iconUrl,
     });
   });
 
@@ -815,9 +1170,10 @@ export function createApp(injectedDb?: DB) {
   );
   app.get("/", (c) =>
     c.json({
-      service: "OpenClaw Crypto Payments API",
+      service: `${productConfig(config, DEFAULT_PRODUCT).name} API`,
       docs: "/api/config",
       version: "1.0.0",
+      products: Object.keys(config.products),
     }),
   );
 
@@ -854,93 +1210,155 @@ async function hmacSha256Hex(secret: string, message: string): Promise<string> {
   return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function sendCallback(
+interface CallbackMetadata {
+  topup?: string;
+  tenantType?: string;
+  vmProvider?: string;
+  hostType?: string;
+  deploymentType?: string;
+  product?: string;
+}
+
+/**
+ * One delivery attempt that NEVER throws — it classifies.
+ *
+ * The throwing `sendCallback` below is kept as the public/legacy surface, but
+ * the retry machinery needs the *shape* of the failure (HTTP status vs network
+ * error vs structurally-undeliverable), because that is what decides whether
+ * retrying identical bytes could ever work.
+ */
+export async function attemptCallback(
   callbackUrl: string,
   payment: PaymentRecord,
-  metadata: {
-    topup?: string;
-    tenantType?: string;
-    vmProvider?: string;
-    hostType?: string;
-    deploymentType?: string;
-  } = {},
-): Promise<void> {
-  // SSRF guard: only POST to allowlisted HTTPS hosts.
+  metadata: CallbackMetadata = {},
+  allowlist: string[] = config.callbackAllowlist,
+  nowMs: number = Date.now(),
+): Promise<AttemptOutcome> {
+  // ── SSRF guard: only POST to allowlisted HTTPS hosts. ──
+  // All three failures below are `permanent`: no amount of retrying makes a
+  // non-allowlisted host allowlisted. They must land in `needs_attention` so an
+  // operator fixes the config, not in `pending` where they burn retries.
   let parsedUrl: URL;
   try {
     parsedUrl = new URL(callbackUrl);
   } catch {
-    console.warn(`[SECURITY] sendCallback: not a valid URL — skipping: ${callbackUrl}`);
-    return;
+    return { ok: false, error: `not a valid URL: ${callbackUrl}`, permanent: true };
   }
   if (parsedUrl.protocol !== "https:") {
-    console.warn(`[SECURITY] sendCallback: URL must use HTTPS — skipping: ${callbackUrl}`);
-    return;
+    return { ok: false, error: `callback URL must use HTTPS: ${callbackUrl}`, permanent: true };
   }
-  if (!config.callbackAllowlist.includes(parsedUrl.hostname)) {
-    // A settled payment whose webhook is dropped is money in with nothing out.
-    // This used to be console.warn + return, which is why OpenClawBot#3600
-    // survived: the payment stayed `verified`, no webhook fired, no retry
-    // existed, and NOTHING recorded that a delivery had been refused. Keep the
-    // SSRF guard — it is correct — but make the drop impossible to miss.
+  if (!allowlist.includes(parsedUrl.hostname)) {
     console.error(
       `[PAYMENT-LOST] sendCallback REFUSED for payment ${payment.id}: host ` +
         `"${parsedUrl.hostname}" is not in CALLBACK_URL_ALLOWLIST ` +
-        `(${config.callbackAllowlist.join(", ")}). The payment is VERIFIED but the ` +
-        `customer will receive NOTHING and there is no retry. Add the host to ` +
+        `(${allowlist.join(", ")}). The payment is VERIFIED but the ` +
+        `customer will receive NOTHING. Add the host to ` +
         `CALLBACK_URL_ALLOWLIST, or stop the caller from signing intents for it.`,
     );
-    throw new CallbackNotDeliverableError(
-      `callback host "${parsedUrl.hostname}" is not allowlisted`,
-    );
+    return {
+      ok: false,
+      error: `callback host "${parsedUrl.hostname}" is not allowlisted`,
+      permanent: true,
+    };
   }
 
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  const payload = JSON.stringify({
-    event: "payment.verified",
-    payment: {
-      id: payment.id,
-      idType: payment.id_type,
-      uid: payment.uid,
-      plan: payment.plan_id ?? undefined,
-      topup: payment.topup_id ?? undefined,
-      chain: payment.chain_id,
-      token: payment.token,
-      amountUsd: payment.amount_usd,
-      txHash: payment.tx_hash,
-      ...(metadata.topup ? { topup: metadata.topup } : {}),
-      ...(metadata.tenantType ? { tenantType: metadata.tenantType } : {}),
-      ...(metadata.vmProvider ? { vmProvider: metadata.vmProvider } : {}),
-      ...(metadata.hostType ? { hostType: metadata.hostType } : {}),
-      ...(metadata.deploymentType ? { deploymentType: metadata.deploymentType } : {}),
+  // ── Payload ──
+  // Everything here is a pure function of the PAYMENT, so it is byte-identical
+  // across attempts — most importantly `payment.txHash`, which is the key the
+  // consumer dedupes on. Only `timestamp` (added by `buildSignedPayload`)
+  // differs per attempt; see the long note in callback-delivery.ts for why that
+  // is required rather than merely convenient.
+  const { payload, timestamp } = buildSignedPayload(
+    {
+      event: "payment.verified",
+      payment: {
+        id: payment.id,
+        idType: payment.id_type,
+        uid: payment.uid,
+        plan: payment.plan_id ?? undefined,
+        topup: payment.topup_id ?? undefined,
+        chain: payment.chain_id,
+        token: payment.token,
+        amountUsd: payment.amount_usd,
+        txHash: payment.tx_hash,
+        ...(metadata.topup ? { topup: metadata.topup } : {}),
+        ...(metadata.tenantType ? { tenantType: metadata.tenantType } : {}),
+        ...(metadata.vmProvider ? { vmProvider: metadata.vmProvider } : {}),
+        ...(metadata.hostType ? { hostType: metadata.hostType } : {}),
+        ...(metadata.deploymentType ? { deploymentType: metadata.deploymentType } : {}),
+        // Always present so the consumer knows which product was paid for;
+        // defaults to "openclaw", which is what every pre-existing caller is.
+        product: metadata.product ?? DEFAULT_PRODUCT,
+      },
     },
-    timestamp,
-  });
+    nowMs,
+  );
 
   const signature = await hmacSha256Hex(config.callbackSecret, payload);
 
-  const resp = await fetch(callbackUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Signature": signature,
-      "X-Timestamp": timestamp,
-    },
-    body: payload,
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(callbackUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Signature": signature,
+        "X-Timestamp": timestamp,
+      },
+      body: payload,
+    });
+  } catch (err) {
+    // No response at all: DNS failure, connection refused, TLS error, timeout.
+    // Always retryable — the consumer never saw the payload.
+    return { ok: false, error: `network error: ${err instanceof Error ? err.message : String(err)}` };
+  }
 
   if (!resp.ok) {
-    console.error(
-      `[PAYMENT-LOST] Callback to ${callbackUrl} FAILED for payment ${payment.id}: ` +
-        `${resp.status} ${resp.statusText}. The payment is VERIFIED but the customer ` +
-        `will receive NOTHING until this is redelivered.`,
-    );
-    throw new CallbackNotDeliverableError(
-      `callback POST returned ${resp.status} ${resp.statusText}`,
-    );
+    return {
+      ok: false,
+      status: resp.status,
+      error: `callback POST returned ${resp.status} ${resp.statusText}`,
+    };
   }
-  console.log(`Callback sent for payment ${payment.id}`);
+  return { ok: true };
 }
+
+/**
+ * Make a delivery outcome findable by an operator.
+ *
+ * `[PAYMENT-STUCK]` + the txHash is the alert hook: a terminal, undelivered
+ * callback means real money is sitting in our wallet with nothing credited, and
+ * only a human can resolve it. The txHash is included because it is the one
+ * identifier that is the same on-chain, in our DB, and in the consumer's.
+ */
+function logDeliveryOutcome(
+  paymentId: string,
+  txHash: string,
+  callbackUrl: string | null,
+  outcome: AttemptOutcome,
+  state: CallbackDeliveryState | null,
+): void {
+  if (outcome.ok) {
+    console.log(`Callback delivered for payment ${paymentId} (tx ${txHash})`);
+    return;
+  }
+  if (state?.status === "needs_attention") {
+    console.error(
+      `[PAYMENT-STUCK] reason=${state.terminal_reason} payment=${paymentId} ` +
+        `tx=${txHash} url=${callbackUrl} attempts=${state.attempts} ` +
+        `lastStatus=${state.last_status} lastError=${outcome.error}. ` +
+        `The payment is VERIFIED and will NOT be retried again. ` +
+        `A human must credit this customer manually.`,
+    );
+    return;
+  }
+  console.warn(
+    `[PAYMENT-RETRY] payment=${paymentId} tx=${txHash} attempt=${state?.attempts ?? "?"} ` +
+      `nextAttemptAt=${state?.next_attempt_at ?? "?"} error=${outcome.error}`,
+  );
+}
+
+
 
 // ── Module exports ───────────────────────────────────────────────────────────
 

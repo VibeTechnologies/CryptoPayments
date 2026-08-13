@@ -1,7 +1,7 @@
 import { createPublicClient, http, parseAbiItem, type Address, formatUnits } from "viem";
 import { arbitrum, base, baseSepolia, mainnet, sepolia } from "viem/chains";
 import type { ChainId, Config } from "./config.ts";
-import { TOKEN_ADDRESSES } from "./config.ts";
+import { TOKEN_ADDRESSES, productConfig } from "./config.ts";
 
 /** ERC-20 Transfer event signature */
 const TRANSFER_EVENT = parseAbiItem(
@@ -494,13 +494,41 @@ export async function verifyTransfer(
 }
 
 /**
- * Resolve a USD amount to a plan ID.
+ * Resolve a USD amount to a plan ID **within one product's price table**.
+ *
+ * Amount alone is NOT a globally unique key once more than one product exists:
+ * two products may price different plans identically, or price the same plan
+ * differently. So callers must scope the lookup. Pass either a bare price table
+ * or `(config, product)` — the latter resolves the product's own table and
+ * falls back to `openclaw` for an absent/unknown product.
  */
-export function resolveplan(amountUsd: number, prices: Config["prices"]): string | null {
-  // Allow 1% tolerance for exchange rate variance
+export function resolveplan(
+  amountUsd: number,
+  source: Config["prices"] | Config,
+  product?: string | null,
+): string | null {
+  const prices: Config["prices"] = "products" in source
+    ? productConfig(source as Config, product).prices
+    : (source as Config["prices"]);
+  // Allow 1% tolerance for exchange rate variance.
+  //
+  // The table is an OPEN map, so only the plans THIS product actually declares
+  // are candidates. A product that sells `pro`/`max` has no `starter` entry and
+  // therefore can never resolve to `"starter"` for any amount — including
+  // openclaw's `starter` price. Previously the table was a fixed struct, every
+  // product inherited `starter`, and a $10 vibe payment resolved to a plan the
+  // consumer rejects as `unknown_plan` (with no callback retry, so the money
+  // was taken and nothing delivered).
+  //
+  // Descending price order preserves the previous max -> pro -> starter
+  // precedence. `validatePriceTable` rejects tables whose bands overlap, so at
+  // most one plan can match and the order is not load-bearing for correctness.
   const tolerance = 0.01;
-  if (Math.abs(amountUsd - prices.max) / prices.max <= tolerance) return "max";
-  if (Math.abs(amountUsd - prices.pro) / prices.pro <= tolerance) return "pro";
-  if (Math.abs(amountUsd - prices.starter) / prices.starter <= tolerance) return "starter";
+  const candidates = Object.entries(prices)
+    .filter(([, price]) => Number.isFinite(price) && price > 0)
+    .sort(([, a], [, b]) => b - a);
+  for (const [plan, price] of candidates) {
+    if (Math.abs(amountUsd - price) / price <= tolerance) return plan;
+  }
   return null;
 }
