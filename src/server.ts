@@ -27,6 +27,7 @@ import {
   voidInvoice,
   createPaymentIntent,
   getPaymentIntentById,
+  getPaymentIntentByTx,
   listPaymentIntents,
   updatePaymentIntentStatus,
   createCheckoutSession,
@@ -36,6 +37,7 @@ import {
   createWebhookEvent,
   recordCallbackOutcome,
   type PaymentRecord,
+  type PaymentIntentRecord,
 } from "./db.ts";
 import { verifyTransfer, resolveplan } from "./verify.ts";
 import { verifyTelegramInitData } from "./telegram.ts";
@@ -169,6 +171,7 @@ export function createApp(injectedDb?: DB) {
     paymentId: string,
     result: { from: string; to: string; amountRaw: string; amountUsd: number; blockNumber?: number },
     ctx: VerificationContext,
+    waitForCallback = false,
   ): Promise<{ ok: true; payment: PaymentRecord | null } | { ok: false; error: string }> {
     // Top-up flow (#29): require the on-chain amount to cover the pack price.
     if (ctx.topup && ctx.topup in TOPUP_PRICES && result.amountUsd < TOPUP_PRICES[ctx.topup]) {
@@ -215,20 +218,29 @@ export function createApp(injectedDb?: DB) {
     // failing callback left a `verified` payment with no webhook and no trace —
     // OpenClabBot#3600. `callback_state` is what makes
     // "settled but never delivered" queryable, and therefore alertable.
-    if (ctx.callbackUrl && config.callbackSecret && verified) {
-      sendCallback(ctx.callbackUrl, verified, {
-        topup: ctx.topup,
-        tenantType: ctx.tenantType,
-        vmProvider: ctx.vmProvider,
-        hostType: ctx.hostType,
-        deploymentType: ctx.deploymentType,
-      })
-        .then(() => recordCallbackOutcome(appDb, paymentId, ctx.callbackUrl!, null))
-        .catch((err) => {
+    if (ctx.callbackUrl && !config.callbackSecret && verified) {
+      await recordCallbackOutcome(appDb, paymentId, ctx.callbackUrl, "CALLBACK_SECRET is not configured");
+      if (waitForCallback) throw new CallbackNotDeliverableError("CALLBACK_SECRET is not configured");
+    } else if (ctx.callbackUrl && config.callbackSecret && verified) {
+      const deliver = async () => {
+        try {
+          await sendCallback(ctx.callbackUrl!, verified, {
+            topup: ctx.topup,
+            tenantType: ctx.tenantType,
+            vmProvider: ctx.vmProvider,
+            hostType: ctx.hostType,
+            deploymentType: ctx.deploymentType,
+          });
+          await recordCallbackOutcome(appDb, paymentId, ctx.callbackUrl!, null);
+        } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
           console.error(`[PAYMENT-LOST] payment ${paymentId} verified but callback failed: ${reason}`);
-          return recordCallbackOutcome(appDb, paymentId, ctx.callbackUrl!, reason);
-        });
+          await recordCallbackOutcome(appDb, paymentId, ctx.callbackUrl!, reason);
+          throw err;
+        }
+      };
+      if (waitForCallback) await deliver();
+      else void deliver().catch(() => undefined);
     } else if (verified && !ctx.callbackUrl) {
       // No callback at all on a verified payment is also money-in-nothing-out.
       console.error(
@@ -239,6 +251,93 @@ export function createApp(injectedDb?: DB) {
     }
 
     return { ok: true, payment: verified };
+  }
+
+  function paymentIntentStatus(intent: PaymentIntentRecord) {
+    const callback = (intent.metadata?.callback_state ?? {}) as Record<string, unknown>;
+    const callbackStatus = typeof callback.status === "string" ? callback.status : "not_attempted";
+    return {
+      id: intent.stripe_id,
+      status: intent.status,
+      chain_id: intent.chain_id,
+      token: intent.token,
+      tx_hash: intent.tx_hash,
+      amount: intent.amount,
+      currency: intent.currency,
+      plan_id: intent.plan_id,
+      topup_id: intent.topup_id,
+      created_at: intent.created_at,
+      updated_at: intent.updated_at,
+      succeeded_at: intent.succeeded_at,
+      callback: {
+        status: callbackStatus,
+        attempts: typeof callback.attempts === "number" ? callback.attempts : 0,
+        delivered_at: typeof callback.delivered_at === "string" ? callback.delivered_at : null,
+        last_attempt_at: typeof callback.last_attempt_at === "string" ? callback.last_attempt_at : null,
+        last_error: typeof callback.last_error === "string" ? callback.last_error : null,
+      },
+      needs_action:
+        intent.status === "succeeded" && callbackStatus !== "delivered"
+          ? "deliver_callback"
+          : intent.status === "processing" || intent.status === "requires_payment_method"
+            ? "verify_chain"
+            : null,
+    };
+  }
+
+  async function reconcilePaymentIntent(intent: PaymentIntentRecord) {
+    if (!intent.tx_hash || !intent.chain_id) {
+      return { ok: false as const, retryable: false, error: "Payment intent has no chain transaction" };
+    }
+
+    const meta = (intent.metadata ?? {}) as Record<string, unknown>;
+    const str = (value: unknown): string | undefined =>
+      typeof value === "string" && value ? value : undefined;
+    const callbackUrl = str(meta.callbackUrl);
+    const callbackState = (meta.callback_state ?? {}) as Record<string, unknown>;
+
+    if (intent.status === "succeeded" && callbackState.status === "delivered") {
+      return { ok: true as const, action: "already_delivered", intent };
+    }
+
+    if (intent.status !== "succeeded") {
+      const result = await verifyTransfer(intent.tx_hash, intent.chain_id as ChainId, config);
+      if (result === "pending") {
+        return { ok: false as const, retryable: true, error: "Transaction is not yet final" };
+      }
+      if (!result) {
+        return { ok: false as const, retryable: true, error: "Transaction not found; terminal failure is unproven" };
+      }
+      const outcome = await finalizeVerifiedPayment(intent.id, result, {
+        callbackUrl,
+        plan: str(meta.plan) ?? intent.plan_id ?? undefined,
+        topup: str(meta.topup) ?? intent.topup_id ?? undefined,
+        tenantType: str(meta.tenantType),
+        vmProvider: str(meta.vmProvider),
+        hostType: str(meta.hostType),
+        deploymentType: str(meta.deploymentType),
+        amountUsd: str(meta.amountUsd),
+        checkoutIntentVerified: meta.checkoutIntentVerified === true,
+      }, true);
+      if (!outcome.ok) return { ok: false as const, retryable: false, error: outcome.error };
+      return { ok: true as const, action: "verified_and_delivered", intent: await getPaymentIntentById(appDb, intent.id) };
+    }
+
+    const payment = await getPaymentById(appDb, intent.id);
+    if (!payment) return { ok: false as const, retryable: false, error: "Payment customer not found" };
+    if (!callbackUrl) {
+      await recordCallbackOutcome(appDb, intent.id, null, "no callbackUrl on the intent");
+      return { ok: false as const, retryable: false, error: "Verified payment has no callback URL" };
+    }
+    await sendCallback(callbackUrl, payment, {
+      topup: str(meta.topup),
+      tenantType: str(meta.tenantType),
+      vmProvider: str(meta.vmProvider),
+      hostType: str(meta.hostType),
+      deploymentType: str(meta.deploymentType),
+    });
+    await recordCallbackOutcome(appDb, intent.id, callbackUrl, null);
+    return { ok: true as const, action: "callback_delivered", intent: await getPaymentIntentById(appDb, intent.id) };
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -699,6 +798,33 @@ export function createApp(injectedDb?: DB) {
     return c.json({ object: "list", data, has_more: data.length === limit });
   });
 
+  app.get("/v1/payment_intents/by_tx/:chain/:txHash", async (c) => {
+    if (!requireApiKey(c)) return c.json({ error: "Unauthorized" }, 401);
+    const chain = c.req.param("chain");
+    const txHash = c.req.param("txHash");
+    if (!["base", "eth", "arbitrum", "ton", "sol", "base_sepolia", "eth_sepolia"].includes(chain)) {
+      return c.json({ error: "Invalid chain" }, 400);
+    }
+    if (!txHash || txHash.length > 128) return c.json({ error: "Invalid transaction hash" }, 400);
+    const intent = await getPaymentIntentByTx(appDb, txHash, chain);
+    if (!intent) return c.json({ error: "Payment intent not found" }, 404);
+    return c.json(paymentIntentStatus(intent));
+  });
+
+  app.post("/v1/payment_intents/:id/reconcile", async (c) => {
+    if (!requireApiKey(c)) return c.json({ error: "Unauthorized" }, 401);
+    const intent = await getPaymentIntentById(appDb, c.req.param("id"));
+    if (!intent) return c.json({ error: "Payment intent not found" }, 404);
+    try {
+      const result = await reconcilePaymentIntent(intent);
+      if (!result.ok) return c.json(result, result.retryable ? 409 : 422);
+      return c.json({ ...result, intent: result.intent ? paymentIntentStatus(result.intent) : null });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ ok: false, retryable: true, error: message }, 502);
+    }
+  });
+
   app.post("/v1/payment_intents/:id/confirm", async (c) => {
     if (!requireApiKey(c)) return c.json({ error: "Unauthorized" }, 401);
     const body = await c.req.json<{
@@ -870,12 +996,10 @@ async function sendCallback(
   try {
     parsedUrl = new URL(callbackUrl);
   } catch {
-    console.warn(`[SECURITY] sendCallback: not a valid URL — skipping: ${callbackUrl}`);
-    return;
+    throw new CallbackNotDeliverableError("callback URL is invalid");
   }
   if (parsedUrl.protocol !== "https:") {
-    console.warn(`[SECURITY] sendCallback: URL must use HTTPS — skipping: ${callbackUrl}`);
-    return;
+    throw new CallbackNotDeliverableError("callback URL must use HTTPS");
   }
   if (!config.callbackAllowlist.includes(parsedUrl.hostname)) {
     // A settled payment whose webhook is dropped is money in with nothing out.

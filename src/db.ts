@@ -444,6 +444,7 @@ export async function createPaymentIntent(
     .from("payment_intents")
     .insert({
       stripe_id: prefixedId("pi"),
+      status: "requires_payment_method",
       customer_id: customerId,
       invoice_id: invoiceId,
       amount: input.amount,
@@ -549,7 +550,8 @@ export async function updatePaymentIntentStatus(
  * schema migration, so this is safe to ship immediately on a live payments
  * service. Promote to real columns later if it needs indexing.
  *
- * Never throws. Losing the audit write must not also lose the payment.
+ * Throws when the audit write fails. Callers may still choose fire-and-forget
+ * delivery, but reconciliation must never report success without durable state.
  */
 export async function recordCallbackOutcome(
   db: DB,
@@ -557,37 +559,32 @@ export async function recordCallbackOutcome(
   callbackUrl: string | null,
   failureReason: string | null,
 ): Promise<void> {
-  try {
-    const column = paymentIntentId.startsWith("pi_") ? "stripe_id" : "id";
-    const { data } = await db
-      .from("payment_intents")
-      .select("metadata")
-      .eq(column, paymentIntentId)
-      .single();
+  const column = paymentIntentId.startsWith("pi_") ? "stripe_id" : "id";
+  const { data, error: readError } = await db
+    .from("payment_intents")
+    .select("metadata")
+    .eq(column, paymentIntentId)
+    .single();
+  if (readError) throw new Error(`Failed to read callback state: ${readError.message}`);
 
-    const existing = ((data as { metadata?: Record<string, unknown> } | null)?.metadata ??
-      {}) as Record<string, unknown>;
-    const prior = (existing.callback_state ?? {}) as { attempts?: number };
+  const existing = ((data as { metadata?: Record<string, unknown> } | null)?.metadata ??
+    {}) as Record<string, unknown>;
+  const prior = (existing.callback_state ?? {}) as { attempts?: number };
 
-    const callbackState = {
-      url: callbackUrl,
-      status: failureReason ? "failed" : "delivered",
-      attempts: (typeof prior.attempts === "number" ? prior.attempts : 0) + 1,
-      delivered_at: failureReason ? null : new Date().toISOString(),
-      last_attempt_at: new Date().toISOString(),
-      last_error: failureReason,
-    };
+  const callbackState = {
+    url: callbackUrl,
+    status: failureReason ? "failed" : "delivered",
+    attempts: (typeof prior.attempts === "number" ? prior.attempts : 0) + 1,
+    delivered_at: failureReason ? null : new Date().toISOString(),
+    last_attempt_at: new Date().toISOString(),
+    last_error: failureReason,
+  };
 
-    await db
-      .from("payment_intents")
-      .update({ metadata: { ...existing, callback_state: callbackState } })
-      .eq(column, paymentIntentId);
-  } catch (err) {
-    console.error(
-      `[recordCallbackOutcome] failed to persist callback state for ${paymentIntentId}: ` +
-        (err instanceof Error ? err.message : String(err)),
-    );
-  }
+  const { error: writeError } = await db
+    .from("payment_intents")
+    .update({ metadata: { ...existing, callback_state: callbackState } })
+    .eq(column, paymentIntentId);
+  if (writeError) throw new Error(`Failed to persist callback state: ${writeError.message}`);
 }
 
 // ── Checkout Sessions ────────────────────────────────────────────────────────

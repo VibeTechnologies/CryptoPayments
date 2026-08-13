@@ -9,6 +9,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "test": "vitest run",
+    "reconcile:payments": "tsx scripts/reconcile-payments.ts",
     "predeploy:edge": "rm -rf supabase/functions/crypto-payments/src && cp -r src supabase/functions/crypto-payments/src",
     "deploy:edge": "supabase functions deploy crypto-payments --no-verify-jwt",
     "test:e2e:live": "bun tests/e2e-sepolia-live.ts",
@@ -37,6 +38,7 @@
     "@types/node": "^22.13.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
+    "supabase": "^2.39.2",
     "vitest": "^3.0.4"
   }
 }

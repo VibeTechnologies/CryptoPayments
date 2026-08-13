@@ -243,6 +243,133 @@ describe("Server API", () => {
     app = createApp(mockDb);
   });
 
+  describe("payment reconciliation", () => {
+    it("requires API authentication for transaction status", async () => {
+      const response = await app.request("/v1/payment_intents/by_tx/eth_sepolia/0xabc");
+      expect(response.status).toBe(401);
+    });
+
+    it("finds a provider intent by chain transaction and reports required action", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce("pending");
+      const submitted = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xstatus",
+          chainId: "eth_sepolia",
+          token: "ausd",
+          idType: "tg",
+          uid: "123",
+          plan: "starter",
+          apiKey: "test-api-key",
+        }),
+      });
+      expect(submitted.status).toBe(202);
+
+      const response = await app.request(
+        "/v1/payment_intents/by_tx/eth_sepolia/0xstatus",
+        { headers: { "x-api-key": "test-api-key" } },
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        status: "requires_payment_method",
+        tx_hash: "0xstatus",
+        needs_action: "verify_chain",
+        callback: { status: "not_attempted", attempts: 0 },
+      });
+    });
+
+    it("re-verifies a pending intent and waits for callback delivery", async () => {
+      mockedVerifyTransfer
+        .mockResolvedValueOnce("pending")
+        .mockResolvedValueOnce({
+          from: "0xsender",
+          to: "0xTestEthWallet",
+          amountRaw: "10000000",
+          amountUsd: 10,
+          blockNumber: 42,
+        });
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response("ok", { status: 200 }),
+      );
+      const submitted = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xreconcile",
+          chainId: "eth_sepolia",
+          token: "ausd",
+          idType: "tg",
+          uid: "456",
+          plan: "starter",
+          amountUsd: "10.00",
+          callbackUrl: "https://admin.openclaw.vibebrowser.app/crypto/webhook",
+          apiKey: "test-api-key",
+        }),
+      });
+      const payment = (await submitted.json()).payment;
+
+      const response = await app.request(`/v1/payment_intents/${payment.id}/reconcile`, {
+        method: "POST",
+        headers: { "x-api-key": "test-api-key" },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ok: true,
+        action: "verified_and_delivered",
+        intent: { status: "succeeded", callback: { status: "delivered", attempts: 1 } },
+      });
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it("does not redeliver an already delivered payment", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok"));
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xsender", to: "0xTestEthWallet", amountRaw: "10000000", amountUsd: 10,
+      });
+      const submitted = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xdelivered", chainId: "eth_sepolia", token: "ausd",
+          idType: "tg", uid: "789", plan: "starter",
+          callbackUrl: "https://admin.openclaw.vibebrowser.app/crypto/webhook",
+          apiKey: "test-api-key",
+        }),
+      });
+      const payment = (await submitted.json()).payment;
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+
+      const response = await app.request(`/v1/payment_intents/${payment.id}/reconcile`, {
+        method: "POST", headers: { "x-api-key": "test-api-key" },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: true, action: "already_delivered" });
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it("keeps an absent chain transaction retryable instead of marking it failed", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce("pending").mockResolvedValueOnce(null);
+      const submitted = await app.request("/api/payment", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xunknown", chainId: "eth_sepolia", token: "ausd",
+          idType: "tg", uid: "999", plan: "starter", apiKey: "test-api-key",
+        }),
+      });
+      const payment = (await submitted.json()).payment;
+      const response = await app.request(`/v1/payment_intents/${payment.id}/reconcile`, {
+        method: "POST", headers: { "x-api-key": "test-api-key" },
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ ok: false, retryable: true });
+      const status = await app.request("/v1/payment_intents/by_tx/eth_sepolia/0xunknown", {
+        headers: { "x-api-key": "test-api-key" },
+      });
+      expect(await status.json()).toMatchObject({ status: "requires_payment_method" });
+    });
+  });
+
   // ── Health ──
 
   describe("GET /api/health", () => {
