@@ -30,7 +30,7 @@ jobs:
       - id: reconcile
         continue-on-error: true
         env:
-          CRYPTO_PAYMENTS_API_URL: ${{ secrets.SUPABASE_URL }}/functions/v1/crypto-payments
+          CRYPTO_PAYMENTS_API_URL: https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments
           API_KEY: ${{ secrets.API_KEY }}
         run: pnpm reconcile:payments
       - if: steps.reconcile.outcome == 'failure'

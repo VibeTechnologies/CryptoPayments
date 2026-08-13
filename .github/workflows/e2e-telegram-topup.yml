@@ -48,7 +48,7 @@ jobs:
       - name: Start branch CryptoPayments API
         env:
           PORT: "9999"
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_URL: https://krjbwbvmrpazdmmjstzo.supabase.co
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           API_KEY: ${{ secrets.API_KEY }}
           CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
