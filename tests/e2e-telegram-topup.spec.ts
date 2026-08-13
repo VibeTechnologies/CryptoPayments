@@ -106,6 +106,7 @@ test('telegram /topup flow: checkout URL → mock wallet → real edge → Payme
       const source = new URL(route.request().url());
       console.log('[test] proxying API request to branch:', source.pathname);
       const response = await route.fetch({ url: `${branchApi}${source.pathname.replace(/^.*\/api/, '/api')}${source.search}` });
+      if (!response.ok()) console.log('[test] branch API error:', response.status(), await response.text());
       await route.fulfill({ response });
     });
   }
