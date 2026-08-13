@@ -45,10 +45,30 @@ jobs:
           mkdir -p testnet
           echo "${{ secrets.TESTNET_WALLET_1_JSON }}" | base64 -d > testnet/wallet-1.json
 
+      - name: Start branch CryptoPayments API
+        env:
+          PORT: "9999"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          API_KEY: ${{ secrets.API_KEY }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+          CHECKOUT_SECRET: ${{ secrets.CHECKOUT_SECRET }}
+          WALLET_ETH: ${{ secrets.WALLET_ETH }}
+          WALLET_ETH_SEPOLIA: ${{ secrets.WALLET_ETH }}
+        run: |
+          nohup pnpm dev > /tmp/cryptopayments-api.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9999/api/health >/dev/null && exit 0
+            sleep 1
+          done
+          cat /tmp/cryptopayments-api.log
+          exit 1
+
       - name: Run E2E tests
         env:
           CHECKOUT_SECRET: ${{ secrets.CHECKOUT_SECRET }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BRANCH_API_URL: http://127.0.0.1:9999
         run: |
           node_modules/.bin/playwright test \
             tests/e2e-telegram-topup.spec.ts \
