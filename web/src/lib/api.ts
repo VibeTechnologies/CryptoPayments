@@ -2,8 +2,9 @@
 
 import { API_BASE, type AppConfig, type PaymentRequest, type PaymentResult } from "./config";
 
-export async function fetchConfig(): Promise<AppConfig> {
-  const res = await fetch(`${API_BASE}/api/config`);
+export async function fetchConfig(product?: string): Promise<AppConfig> {
+  const qs = product ? `?product=${encodeURIComponent(product)}` : "";
+  const res = await fetch(`${API_BASE}/api/config${qs}`);
   if (!res.ok) throw new Error(`Failed to load config: ${res.status}`);
   return res.json();
 }

@@ -55,6 +55,7 @@ export default function PayPage() {
   const [vmProvider, setVmProvider] = useState<"azure" | "hetzner" | "">("");
   const [hostType, setHostType] = useState<"vps" | "">("");
   const [deploymentType, setDeploymentType] = useState("");
+  const [product, setProduct] = useState("");
   const [amountUsd, setAmountUsd] = useState("");
   const [intentExp, setIntentExp] = useState("");
   const [intentSig, setIntentSig] = useState("");
@@ -90,6 +91,7 @@ export default function PayPage() {
     const pVmProvider = params.get("vmp") || params.get("vmProvider") || "";
     const pHostType = params.get("hostType") || "";
     const pDeploymentType = params.get("deploymentType") || "";
+    const pProduct = params.get("product") || "";
     const pAmountUsd = params.get("amountUsd") || "";
     const pExp = params.get("exp") || "";
     const pSig = params.get("sig") || "";
@@ -127,13 +129,14 @@ export default function PayPage() {
     setVmProvider(pVmProvider === "azure" || pVmProvider === "hetzner" ? pVmProvider : "");
     setHostType(pHostType === "vps" ? "vps" : "");
     setDeploymentType(pDeploymentType);
+    setProduct(pProduct);
     setAmountUsd(pAmountUsd);
     setIntentExp(pExp);
     setIntentSig(pSig);
     setUserName(pName || (pIdType === "tg" ? `User ${pUid}` : pUid));
 
     // Fetch config
-    fetchConfig()
+    fetchConfig(new URLSearchParams(window.location.search).get("product") || undefined)
       .then(setConfig)
       .catch(() => setStatus({ type: "error", message: "Failed to load payment configuration" }))
       .finally(() => setLoading(false));
@@ -207,7 +210,7 @@ export default function PayPage() {
       await doSubmit(hash);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedChain, selectedToken, idType, uid, plan, topup, callbackUrl, initData, tenantType, vmProvider, hostType, deploymentType, amountUsd, intentExp, intentSig],
+    [selectedChain, selectedToken, idType, uid, plan, topup, callbackUrl, initData, tenantType, vmProvider, hostType, deploymentType, product, amountUsd, intentExp, intentSig],
   );
 
   // Submit payment for verification
@@ -232,6 +235,7 @@ export default function PayPage() {
         vmProvider: vmProvider || undefined,
         hostType: hostType || undefined,
         deploymentType: deploymentType || undefined,
+        product: product || undefined,
         amountUsd: amountUsd || undefined,
         callbackUrl: callbackUrl || undefined,
         initData: initData || undefined,
@@ -377,7 +381,7 @@ export default function PayPage() {
 
         {/* Footer */}
         <p className="mt-8 text-center text-xs text-muted/50">
-          Powered by OpenClaw
+          Powered by {config?.productName ?? "OpenClaw"}
         </p>
       </div>
     </main>

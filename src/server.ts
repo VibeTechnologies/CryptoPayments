@@ -2,7 +2,15 @@ import { Hono, type Context } from "hono";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { cors } from "hono/cors";
-import { loadConfig, type ChainId, type TokenId, TOKEN_ADDRESSES } from "./config.ts";
+import {
+  loadConfig,
+  productConfig,
+  configForProduct,
+  DEFAULT_PRODUCT,
+  type ChainId,
+  type TokenId,
+  TOKEN_ADDRESSES,
+} from "./config.ts";
 import {
   createDB,
   type DB,
@@ -43,7 +51,12 @@ import { verifyTelegramInitData } from "./telegram.ts";
 const config = loadConfig();
 const db = createDB(config.supabaseUrl, config.supabaseKey);
 
-const TOPUP_PRICES: Record<string, number> = { small: 5, medium: 10, large: 25 };
+/**
+ * Top-up pack prices for the DEFAULT product. Kept as a module constant only
+ * for validating pack NAMES; the price actually charged is read per-product
+ * from `productConfig(config, product).topupPrices`.
+ */
+const TOPUP_PRICES: Record<string, number> = productConfig(config, DEFAULT_PRODUCT).topupPrices;
 
 /**
  * Constant-time string comparison to prevent timing-based API key leaks.
@@ -113,6 +126,21 @@ export function createApp(injectedDb?: DB) {
      * swap the delivered product after the fact.
      */
     deploymentType?: string;
+    /**
+     * Product being purchased ("openclaw" | "vibe" | ...).
+     *
+     * MUST be inside the canonical string. `product` selects the price table,
+     * the receiving wallet and the callback allowlist, so an unsigned copy would
+     * let an attacker pay product A's cheap price and be credited product B's
+     * expensive plan — the same class of bug as the unsigned `deploymentType`
+     * in OpenClawBot#3583, where a purchase-shaping field sat outside the
+     * signature.
+     *
+     * It is only appended when present, so a legacy intent (no `product`)
+     * produces the byte-identical canonical string it produced before this
+     * field existed, and keeps validating.
+     */
+    product?: string;
     amountUsd?: string;
     exp?: string;
     sig?: string;
@@ -135,6 +163,7 @@ export function createApp(injectedDb?: DB) {
     if (input.vmProvider) params.set("vmp", input.vmProvider);
     if (input.hostType) params.set("hostType", input.hostType);
     if (input.deploymentType) params.set("deploymentType", input.deploymentType);
+    if (input.product) params.set("product", input.product);
     const canonical = [...params.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([key, value]) => `${key}=${value}`)
@@ -160,6 +189,8 @@ export function createApp(injectedDb?: DB) {
     hostType?: string;
     /** Signed primary runtime ("openclaw" | "hermes"). */
     deploymentType?: string;
+    /** Signed product id. Absent => DEFAULT_PRODUCT ("openclaw"). */
+    product?: string;
     /** Signed checkout-intent amount (string, as signed). */
     amountUsd?: string;
     checkoutIntentVerified?: boolean;
@@ -170,14 +201,18 @@ export function createApp(injectedDb?: DB) {
     result: { from: string; to: string; amountRaw: string; amountUsd: number; blockNumber?: number },
     ctx: VerificationContext,
   ): Promise<{ ok: true; payment: PaymentRecord | null } | { ok: false; error: string }> {
+    const product = productConfig(config, ctx.product);
+
     // Top-up flow (#29): require the on-chain amount to cover the pack price.
-    if (ctx.topup && ctx.topup in TOPUP_PRICES && result.amountUsd < TOPUP_PRICES[ctx.topup]) {
+    const topupPrices = product.topupPrices;
+    if (ctx.topup && ctx.topup in topupPrices && result.amountUsd < topupPrices[ctx.topup]) {
       await markPaymentFailed(appDb, paymentId);
-      return { ok: false, error: `Underpaid: expected $${TOPUP_PRICES[ctx.topup]}, got $${result.amountUsd}` };
+      return { ok: false, error: `Underpaid: expected $${topupPrices[ctx.topup]}, got $${result.amountUsd}` };
     }
 
-    // Plan flow (main): resolve & validate the plan against the verified amount.
-    const planId = resolveplan(result.amountUsd, config.prices);
+    // Plan flow (main): resolve & validate the plan against the verified amount,
+    // against THIS product's price table only.
+    const planId = resolveplan(result.amountUsd, config, ctx.product);
     const signedAmountUsd = Number(ctx.amountUsd);
     const matchesSignedIntentAmount = !!ctx.checkoutIntentVerified &&
       !!ctx.plan &&
@@ -222,7 +257,8 @@ export function createApp(injectedDb?: DB) {
         vmProvider: ctx.vmProvider,
         hostType: ctx.hostType,
         deploymentType: ctx.deploymentType,
-      })
+        product: product.id,
+      }, product.callbackAllowlist)
         .then(() => recordCallbackOutcome(appDb, paymentId, ctx.callbackUrl!, null))
         .catch((err) => {
           const reason = err instanceof Error ? err.message : String(err);
@@ -254,9 +290,17 @@ export function createApp(injectedDb?: DB) {
   // ── Public config ──────────────────────────────────────────────────────────
 
   app.get("/api/config", (c) => {
+    // `?product=` scopes wallets/prices to that product. Absent => openclaw,
+    // so the existing SPA sees exactly what it saw before.
+    const p = productConfig(config, c.req.query("product"));
     return c.json({
-      wallets: config.wallets,
-      prices: config.prices,
+      product: p.id,
+      productName: p.name,
+      productIconUrl: p.iconUrl,
+      products: Object.keys(config.products),
+      wallets: p.wallets,
+      prices: p.prices,
+      topupPrices: p.topupPrices,
       tokens: TOKEN_ADDRESSES,
       chains: ["base", "eth", "arbitrum", "ton", "sol", "base_sepolia", "eth_sepolia"],
     });
@@ -277,6 +321,8 @@ export function createApp(injectedDb?: DB) {
       vmProvider?: "azure" | "hetzner";
       hostType?: "vps";
       deploymentType?: "openclaw" | "hermes";
+      /** Product being paid for. Absent => "openclaw" (backward compatible). */
+      product?: string;
       amountUsd?: string;
       callbackUrl?: string;
       initData?: string;
@@ -341,6 +387,14 @@ export function createApp(injectedDb?: DB) {
       return c.json({ error: "topup must be small, medium, or large" }, 400);
     }
 
+    // Unknown product ids are rejected rather than silently coerced to
+    // `openclaw`: a typo'd product must not be settled at another product's
+    // prices. Absent is fine and means `openclaw`.
+    if (body.product !== undefined && !(body.product in config.products)) {
+      return c.json({ error: `Unknown product: ${body.product}` }, 400);
+    }
+    const productId = productConfig(config, body.product).id;
+
     // ── Duplicate check ──
     const existing = await getPaymentByTx(appDb, body.txHash, body.chainId);
     if (existing) {
@@ -360,6 +414,7 @@ export function createApp(injectedDb?: DB) {
       ...(body.vmProvider ? { vmProvider: body.vmProvider } : {}),
       ...(body.hostType ? { hostType: body.hostType } : {}),
       ...(body.deploymentType ? { deploymentType: body.deploymentType } : {}),
+      ...(body.product ? { product: body.product } : {}),
       ...(body.amountUsd ? { amountUsd: body.amountUsd } : {}),
       checkoutIntentVerified,
     };
@@ -384,7 +439,7 @@ export function createApp(injectedDb?: DB) {
 
     // ── Verify on-chain ──
     try {
-      const result = await verifyTransfer(body.txHash, body.chainId, config);
+      const result = await verifyTransfer(body.txHash, body.chainId, configForProduct(config, productId));
 
       if (result === "pending") {
         // TX not yet mined or not enough confirmations — leave payment as pending, caller retries
@@ -408,6 +463,7 @@ export function createApp(injectedDb?: DB) {
         vmProvider: body.vmProvider,
         hostType: body.hostType,
         deploymentType: body.deploymentType,
+        product: productId,
         amountUsd: body.amountUsd,
         checkoutIntentVerified,
       });
@@ -456,7 +512,13 @@ export function createApp(injectedDb?: DB) {
     // using the server-persisted metadata (never client-supplied at poll time).
     if (payment.status === "pending" && payment.tx_hash && payment.chain_id) {
       try {
-        const result = await verifyTransfer(payment.tx_hash, payment.chain_id as ChainId, config);
+        const meta0 = (payment.metadata ?? {}) as Record<string, unknown>;
+        const metaProduct = typeof meta0.product === "string" ? meta0.product : undefined;
+        const result = await verifyTransfer(
+          payment.tx_hash,
+          payment.chain_id as ChainId,
+          configForProduct(config, metaProduct),
+        );
         if (result && result !== "pending") {
           const meta = (payment.metadata ?? {}) as Record<string, unknown>;
           const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
@@ -468,6 +530,7 @@ export function createApp(injectedDb?: DB) {
             vmProvider: str(meta.vmProvider),
             hostType: str(meta.hostType),
             deploymentType: str(meta.deploymentType),
+            product: str(meta.product),
             amountUsd: str(meta.amountUsd),
             checkoutIntentVerified: meta.checkoutIntentVerified === true,
           });
@@ -800,10 +863,11 @@ export function createApp(injectedDb?: DB) {
   // ── TonConnect manifest (required for TON wallet integration) ─────────────
   app.get("/tonconnect-manifest.json", (c) => {
     const baseUrl = config.baseUrl || `${c.req.url.split("/tonconnect")[0]}`;
+    const brand = productConfig(config, c.req.query("product"));
     return c.json({
       url: baseUrl,
-      name: "OpenClaw Crypto Payments",
-      iconUrl: "https://openclaw.ai/favicon.ico",
+      name: brand.name,
+      iconUrl: brand.iconUrl,
     });
   });
 
@@ -815,9 +879,10 @@ export function createApp(injectedDb?: DB) {
   );
   app.get("/", (c) =>
     c.json({
-      service: "OpenClaw Crypto Payments API",
+      service: `${productConfig(config, DEFAULT_PRODUCT).name} API`,
       docs: "/api/config",
       version: "1.0.0",
+      products: Object.keys(config.products),
     }),
   );
 
@@ -863,7 +928,9 @@ async function sendCallback(
     vmProvider?: string;
     hostType?: string;
     deploymentType?: string;
+    product?: string;
   } = {},
+  allowlist: string[] = config.callbackAllowlist,
 ): Promise<void> {
   // SSRF guard: only POST to allowlisted HTTPS hosts.
   let parsedUrl: URL;
@@ -877,7 +944,7 @@ async function sendCallback(
     console.warn(`[SECURITY] sendCallback: URL must use HTTPS — skipping: ${callbackUrl}`);
     return;
   }
-  if (!config.callbackAllowlist.includes(parsedUrl.hostname)) {
+  if (!allowlist.includes(parsedUrl.hostname)) {
     // A settled payment whose webhook is dropped is money in with nothing out.
     // This used to be console.warn + return, which is why OpenClawBot#3600
     // survived: the payment stayed `verified`, no webhook fired, no retry
@@ -886,7 +953,7 @@ async function sendCallback(
     console.error(
       `[PAYMENT-LOST] sendCallback REFUSED for payment ${payment.id}: host ` +
         `"${parsedUrl.hostname}" is not in CALLBACK_URL_ALLOWLIST ` +
-        `(${config.callbackAllowlist.join(", ")}). The payment is VERIFIED but the ` +
+        `(${allowlist.join(", ")}). The payment is VERIFIED but the ` +
         `customer will receive NOTHING and there is no retry. Add the host to ` +
         `CALLBACK_URL_ALLOWLIST, or stop the caller from signing intents for it.`,
     );
@@ -913,6 +980,9 @@ async function sendCallback(
       ...(metadata.vmProvider ? { vmProvider: metadata.vmProvider } : {}),
       ...(metadata.hostType ? { hostType: metadata.hostType } : {}),
       ...(metadata.deploymentType ? { deploymentType: metadata.deploymentType } : {}),
+      // Always present so the consumer knows which product was paid for;
+      // defaults to "openclaw", which is what every pre-existing caller is.
+      product: metadata.product ?? DEFAULT_PRODUCT,
     },
     timestamp,
   });

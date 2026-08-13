@@ -10,6 +10,10 @@ export type ChainId = "base" | "eth" | "arbitrum" | "sol" | "ton" | "base_sepoli
 export type TokenId = "usdc" | "usdt" | "ausd";
 
 export interface AppConfig {
+  /** Product this config is scoped to (defaults to "openclaw"). */
+  product?: string;
+  /** Display name used for branding. */
+  productName?: string;
   wallets: Record<ChainId, string>;
   prices: Record<string, number>;
   tokens: Record<ChainId, Record<TokenId, string>>;
@@ -29,6 +33,8 @@ export interface PaymentRequest {
   hostType?: "vps";
   /** Tenant runtime selector (openclaw | hermes). Covered by the intent signature. */
   deploymentType?: string;
+  /** Product being paid for. Absent => "openclaw". Covered by the intent signature. */
+  product?: string;
   amountUsd?: string;
   callbackUrl?: string;
   initData?: string;

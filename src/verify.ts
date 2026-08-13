@@ -1,7 +1,7 @@
 import { createPublicClient, http, parseAbiItem, type Address, formatUnits } from "viem";
 import { arbitrum, base, baseSepolia, mainnet, sepolia } from "viem/chains";
 import type { ChainId, Config } from "./config.ts";
-import { TOKEN_ADDRESSES } from "./config.ts";
+import { TOKEN_ADDRESSES, productConfig } from "./config.ts";
 
 /** ERC-20 Transfer event signature */
 const TRANSFER_EVENT = parseAbiItem(
@@ -494,9 +494,22 @@ export async function verifyTransfer(
 }
 
 /**
- * Resolve a USD amount to a plan ID.
+ * Resolve a USD amount to a plan ID **within one product's price table**.
+ *
+ * Amount alone is NOT a globally unique key once more than one product exists:
+ * two products may price different plans identically, or price the same plan
+ * differently. So callers must scope the lookup. Pass either a bare price table
+ * or `(config, product)` — the latter resolves the product's own table and
+ * falls back to `openclaw` for an absent/unknown product.
  */
-export function resolveplan(amountUsd: number, prices: Config["prices"]): string | null {
+export function resolveplan(
+  amountUsd: number,
+  source: Config["prices"] | Config,
+  product?: string | null,
+): string | null {
+  const prices: Config["prices"] = "products" in source
+    ? productConfig(source as Config, product).prices
+    : (source as Config["prices"]);
   // Allow 1% tolerance for exchange rate variance
   const tolerance = 0.01;
   if (Math.abs(amountUsd - prices.max) / prices.max <= tolerance) return "max";

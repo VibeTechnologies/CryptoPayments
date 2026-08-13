@@ -1,18 +1,53 @@
+/**
+ * Product (tenant) identifier. The service is multi-product: OpenClawBot and
+ * vibebrowser both settle through it, with independent price tables, receiving
+ * wallets and callback allowlists.
+ *
+ * `openclaw` is the DEFAULT and must stay the default forever: every intent
+ * signed before multi-product support existed carries no `product` field, and
+ * those intents are live in production.
+ */
+export const DEFAULT_PRODUCT = "openclaw";
+
+export interface PriceTable {
+  starter: number;
+  pro: number;
+  max: number;
+}
+
+export interface WalletTable {
+  base: string;
+  eth: string;
+  arbitrum: string;
+  ton: string;
+  sol: string;
+  base_sepolia: string;
+  eth_sepolia: string;
+}
+
+export interface ProductConfig {
+  /** Product id, e.g. "openclaw" | "vibe" */
+  id: string;
+  /** Display name used for branding (TonConnect manifest, pay page). */
+  name: string;
+  /** Favicon / icon URL used for branding. */
+  iconUrl: string;
+  prices: PriceTable;
+  topupPrices: Record<string, number>;
+  /** Receiving wallets for this product (falls back to the global WALLET_* vars). */
+  wallets: WalletTable;
+  /** Hostnames sendCallback may POST to for this product. */
+  callbackAllowlist: string[];
+}
+
 export interface Config {
   port: number;
   /** Supabase project URL */
   supabaseUrl: string;
   /** Supabase service role key (bypasses RLS) */
   supabaseKey: string;
-  wallets: {
-    base: string;
-    eth: string;
-    arbitrum: string;
-    ton: string;
-    sol: string;
-    base_sepolia: string;
-    eth_sepolia: string;
-  };
+  /** Default-product (openclaw) wallets. Kept flat for backward compatibility. */
+  wallets: WalletTable;
   rpc: {
     base: string;
     eth: string;
@@ -22,11 +57,10 @@ export interface Config {
     base_sepolia: string;
     eth_sepolia: string;
   };
-  prices: {
-    starter: number;
-    pro: number;
-    max: number;
-  };
+  /** Default-product (openclaw) prices. Kept flat for backward compatibility. */
+  prices: PriceTable;
+  /** Per-product configuration, keyed by product id. Always contains `openclaw`. */
+  products: Record<string, ProductConfig>;
   /** Telegram bot token — required for initData verification in Mini App mode */
   telegramBotToken: string;
   /** Shared API key for bot-to-payment-service calls */
@@ -49,6 +83,9 @@ const env = (key: string, fallback = ""): string => {
   return g.process?.env?.[key] ?? fallback;
 };
 
+const splitList = (raw: string): string[] =>
+  raw.split(",").map((s) => s.trim()).filter(Boolean);
+
 export function loadConfig(): Config {
   // Security startup warnings — logged once at boot so ops notices misconfiguration.
   if (!env("API_KEY")) {
@@ -58,19 +95,78 @@ export function loadConfig(): Config {
     console.warn("[SECURITY] CHECKOUT_SECRET not set; falling back to CALLBACK_SECRET — set a distinct value");
   }
 
+  const baseWallets: WalletTable = {
+    base: env("WALLET_BASE"),
+    eth: env("WALLET_ETH"),
+    arbitrum: env("WALLET_ARBITRUM"),
+    ton: env("WALLET_TON"),
+    sol: env("WALLET_SOL"),
+    base_sepolia: env("WALLET_BASE_SEPOLIA", env("WALLET_BASE")),
+    eth_sepolia: env("WALLET_ETH_SEPOLIA", env("WALLET_ETH")),
+  };
+  const basePrices: PriceTable = {
+    starter: Number(env("PRICE_STARTER")) || 10,
+    pro: Number(env("PRICE_PRO")) || 25,
+    max: Number(env("PRICE_MAX")) || 100,
+  };
+  const baseTopupPrices: Record<string, number> = {
+    small: Number(env("TOPUP_PRICE_SMALL")) || 5,
+    medium: Number(env("TOPUP_PRICE_MEDIUM")) || 10,
+    large: Number(env("TOPUP_PRICE_LARGE")) || 25,
+  };
+  const baseAllowlist = splitList(
+    env(
+      "CALLBACK_URL_ALLOWLIST",
+      "admin.openclaw.agentlabs.cc,admin.openclaw.vibebrowser.app,pay.agentlabs.cc",
+    ),
+  );
+
+  // Every product listed in PRODUCTS gets a config. Each field falls back to
+  // the corresponding flat env var, so `openclaw` is byte-for-byte what it was
+  // before multi-product support and a product with no overrides shares the
+  // same wallets/prices/allowlist (a shared wallet stays possible).
+  const productIds = splitList(env("PRODUCTS", DEFAULT_PRODUCT));
+  if (!productIds.includes(DEFAULT_PRODUCT)) productIds.unshift(DEFAULT_PRODUCT);
+
+  const products: Record<string, ProductConfig> = {};
+  for (const id of productIds) {
+    const P = id.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+    const num = (key: string, fallback: number) => Number(env(`${key}_${P}`)) || fallback;
+    products[id] = {
+      id,
+      name: env(`PRODUCT_NAME_${P}`, id === DEFAULT_PRODUCT ? "OpenClaw Crypto Payments" : id),
+      iconUrl: env(`PRODUCT_ICON_${P}`, "https://openclaw.ai/favicon.ico"),
+      prices: {
+        starter: num("PRICE_STARTER", basePrices.starter),
+        pro: num("PRICE_PRO", basePrices.pro),
+        max: num("PRICE_MAX", basePrices.max),
+      },
+      topupPrices: {
+        small: num("TOPUP_PRICE_SMALL", baseTopupPrices.small),
+        medium: num("TOPUP_PRICE_MEDIUM", baseTopupPrices.medium),
+        large: num("TOPUP_PRICE_LARGE", baseTopupPrices.large),
+      },
+      wallets: {
+        base: env(`WALLET_BASE_${P}`, baseWallets.base),
+        eth: env(`WALLET_ETH_${P}`, baseWallets.eth),
+        arbitrum: env(`WALLET_ARBITRUM_${P}`, baseWallets.arbitrum),
+        ton: env(`WALLET_TON_${P}`, baseWallets.ton),
+        sol: env(`WALLET_SOL_${P}`, baseWallets.sol),
+        base_sepolia: env(`WALLET_BASE_SEPOLIA_${P}`, env(`WALLET_BASE_${P}`, baseWallets.base_sepolia)),
+        eth_sepolia: env(`WALLET_ETH_SEPOLIA_${P}`, env(`WALLET_ETH_${P}`, baseWallets.eth_sepolia)),
+      },
+      callbackAllowlist: (() => {
+        const raw = env(`CALLBACK_URL_ALLOWLIST_${P}`);
+        return raw ? splitList(raw) : baseAllowlist;
+      })(),
+    };
+  }
+
   return {
     port: Number(env("PORT")) || 3003,
     supabaseUrl: env("SUPABASE_URL"),
     supabaseKey: env("SUPABASE_SERVICE_ROLE_KEY"),
-    wallets: {
-      base: env("WALLET_BASE"),
-      eth: env("WALLET_ETH"),
-      arbitrum: env("WALLET_ARBITRUM"),
-      ton: env("WALLET_TON"),
-      sol: env("WALLET_SOL"),
-      base_sepolia: env("WALLET_BASE_SEPOLIA", env("WALLET_BASE")),
-      eth_sepolia: env("WALLET_ETH_SEPOLIA", env("WALLET_ETH")),
-    },
+    wallets: baseWallets,
     rpc: {
       base: env("RPC_BASE", "https://mainnet.base.org"),
       eth: env("RPC_ETH", "https://cloudflare-eth.com"),
@@ -80,11 +176,8 @@ export function loadConfig(): Config {
       base_sepolia: env("RPC_BASE_SEPOLIA", "https://sepolia.base.org"),
       eth_sepolia: env("RPC_ETH_SEPOLIA", "https://ethereum-sepolia-rpc.publicnode.com"),
     },
-    prices: {
-      starter: Number(env("PRICE_STARTER")) || 10,
-      pro: Number(env("PRICE_PRO")) || 25,
-      max: Number(env("PRICE_MAX")) || 100,
-    },
+    prices: basePrices,
+    products,
     telegramBotToken: env("TELEGRAM_BOT_TOKEN"),
     apiKey: env("API_KEY"),
     callbackSecret: env("CALLBACK_SECRET"),
@@ -103,10 +196,7 @@ export function loadConfig(): Config {
     // Do not prune an entry here just because it looks unused: this list is the
     // only thing standing between a settled payment and a black hole, and
     // nothing in either service detects a drop.
-    callbackAllowlist: env(
-      "CALLBACK_URL_ALLOWLIST",
-      "admin.openclaw.agentlabs.cc,admin.openclaw.vibebrowser.app,pay.agentlabs.cc",
-    ).split(",").map((s) => s.trim()).filter(Boolean),
+    callbackAllowlist: baseAllowlist,
   };
 }
 
@@ -147,3 +237,25 @@ export const TOKEN_ADDRESSES: Record<ChainId, { usdt: string; usdc: string; ausd
 };
 
 export type TokenId = "usdt" | "usdc" | "ausd";
+
+/**
+ * Resolve a product's config. An absent/unknown product resolves to
+ * `openclaw` — the pre-multi-product behaviour, which every legacy intent
+ * depends on.
+ */
+export function productConfig(config: Config, product?: string | null): ProductConfig {
+  const id = (product ?? "").trim() || DEFAULT_PRODUCT;
+  return config.products[id] ?? config.products[DEFAULT_PRODUCT];
+}
+
+/**
+ * A Config whose `wallets` are the given product's receiving wallets.
+ *
+ * Used so `verifyTransfer` keeps its exact on-chain logic and simply checks a
+ * different recipient. For a product with no wallet overrides this returns the
+ * same addresses as before (shared wallet).
+ */
+export function configForProduct(config: Config, product?: string | null): Config {
+  const p = productConfig(config, product);
+  return { ...config, wallets: p.wallets, prices: p.prices, callbackAllowlist: p.callbackAllowlist };
+}
