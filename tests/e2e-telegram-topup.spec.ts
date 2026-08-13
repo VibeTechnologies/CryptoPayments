@@ -102,8 +102,9 @@ test.beforeAll(async () => {
 test('telegram /topup flow: checkout URL → mock wallet → real edge → Payment verified!', async ({ page }) => {
   const branchApi = process.env.BRANCH_API_URL;
   if (branchApi) {
-    await page.route('**/functions/v1/crypto-payments/api/**', async route => {
+    await page.route(url => url.pathname.includes('/api/'), async route => {
       const source = new URL(route.request().url());
+      console.log('[test] proxying API request to branch:', source.pathname);
       const response = await route.fetch({ url: `${branchApi}${source.pathname.replace(/^.*\/api/, '/api')}${source.search}` });
       await route.fulfill({ response });
     });
