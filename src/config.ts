@@ -239,13 +239,47 @@ export const TOKEN_ADDRESSES: Record<ChainId, { usdt: string; usdc: string; ausd
 export type TokenId = "usdt" | "usdc" | "ausd";
 
 /**
- * Resolve a product's config. An absent/unknown product resolves to
- * `openclaw` — the pre-multi-product behaviour, which every legacy intent
- * depends on.
+ * Resolve a product's config.
+ *
+ * An ABSENT/empty product resolves to `openclaw` — the pre-multi-product
+ * behaviour that every legacy intent depends on. An UNKNOWN product THROWS.
+ *
+ * Throwing (rather than silently coercing to the default) matters because
+ * `product` selects the receiving wallet, the price table and the callback
+ * allowlist. The old fallback meant that removing a product from `PRODUCTS`
+ * while payments were pending caused those payments to be re-verified against
+ * openclaw's wallet and prices on the GET lazy-re-verify path, which had no
+ * validation gate of its own.
+ *
+ * Callers that legitimately want lenient behaviour for a cosmetic,
+ * client-supplied id (branding endpoints) must use `productConfigOrDefault`.
  */
 export function productConfig(config: Config, product?: string | null): ProductConfig {
   const id = (product ?? "").trim() || DEFAULT_PRODUCT;
-  return config.products[id] ?? config.products[DEFAULT_PRODUCT];
+  const resolved = config.products[id];
+  if (!resolved) throw new UnknownProductError(id);
+  return resolved;
+}
+
+/** Error thrown by `productConfig` for a product id that is not configured. */
+export class UnknownProductError extends Error {
+  constructor(public readonly productId: string) {
+    super(`Unknown product: ${productId}`);
+    this.name = "UnknownProductError";
+  }
+}
+
+/**
+ * Lenient variant for COSMETIC uses only (product name/icon on public branding
+ * endpoints), where an unknown `?product=` query param must not 500. Never use
+ * this where wallets, prices or the callback allowlist are consumed.
+ */
+export function productConfigOrDefault(config: Config, product?: string | null): ProductConfig {
+  try {
+    return productConfig(config, product);
+  } catch {
+    return config.products[DEFAULT_PRODUCT];
+  }
 }
 
 /**

@@ -744,12 +744,15 @@ export async function insertPayment(db: DB, p: InsertPayment): Promise<PaymentRe
     metadata: p.metadata,
   });
 
-  // Set tx_hash and metadata directly
-  if (p.txHash) {
+  // Set tx_hash and metadata directly.
+  // Stored normalized (trim + lowercase) so the duplicate lookup in
+  // `getPaymentByTx` matches regardless of the casing the client submitted.
+  const storedTxHash = p.txHash ? normalizeTxHash(p.txHash) : p.txHash;
+  if (storedTxHash) {
     const { error: txUpdateError } = await db
       .from("payment_intents")
       .update({
-        tx_hash: p.txHash,
+        tx_hash: storedTxHash,
         from_address: p.fromAddress ?? null,
         to_address: p.toAddress ?? null,
         block_number: p.blockNumber ?? null,
@@ -760,7 +763,7 @@ export async function insertPayment(db: DB, p: InsertPayment): Promise<PaymentRe
   }
 
   return piToPaymentRecord(
-    { ...pi, tx_hash: p.txHash, from_address: p.fromAddress ?? null, to_address: p.toAddress ?? null, block_number: p.blockNumber ?? null, amount_raw: p.amountRaw },
+    { ...pi, tx_hash: storedTxHash, from_address: p.fromAddress ?? null, to_address: p.toAddress ?? null, block_number: p.blockNumber ?? null, amount_raw: p.amountRaw },
     customer,
   );
 }
@@ -773,8 +776,18 @@ export async function getPaymentById(db: DB, id: string): Promise<PaymentRecord 
   return piToPaymentRecord(pi, customer);
 }
 
+/**
+ * Normalize a transaction hash for storage and lookup: trim surrounding
+ * whitespace and lowercase. Without this, two casings of the same tx create two
+ * rows and therefore two callbacks — the duplicate check misses. Mirrors the
+ * consumer-side `normalizeTxHash`.
+ */
+export function normalizeTxHash(txHash: string): string {
+  return txHash.trim().toLowerCase();
+}
+
 export async function getPaymentByTx(db: DB, txHash: string, chainId: string): Promise<PaymentRecord | null> {
-  const pi = await getPaymentIntentByTx(db, txHash, chainId);
+  const pi = await getPaymentIntentByTx(db, normalizeTxHash(txHash), chainId);
   if (!pi || !pi.customer_id) return null;
   const customer = await getCustomerById(db, pi.customer_id);
   if (!customer) return null;

@@ -44,14 +44,30 @@ const { loadConfig, productConfig, configForProduct, DEFAULT_PRODUCT } = await i
   "../src/config.js"
 );
 const { resolveplan } = await import("../src/verify.js");
+const { insertPayment } = await import("../src/db.js");
 const mockedVerifyTransfer = vi.mocked(verifyTransfer);
 
 /**
- * Reference implementation of the canonical signing string, written out
+ * Reference implementation of the CURRENT canonical signing string, written out
  * longhand rather than reusing the server's builder — a test that calls the
  * code under test to compute the expected value proves nothing.
+ *
+ * Length-prefixed on both key and value: `<kLen>:<k>=<vLen>:<v>` joined by "\n".
  */
 function signIntent(params: Record<string, string>): string {
+  const canonical = [...new URLSearchParams(params).entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k.length}:${k}=${v.length}:${v}`)
+    .join("\n");
+  return createHmac("sha256", "test-callback-secret").update(canonical).digest("hex");
+}
+
+/**
+ * Reference implementation of the LEGACY (pre-length-prefix) canonical string,
+ * still in production use by OpenClawBot. Kept so backward compatibility is
+ * tested against the real old algorithm.
+ */
+function signIntentLegacy(params: Record<string, string>): string {
   const canonical = [...new URLSearchParams(params).entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([k, v]) => `${k}=${v}`)
@@ -60,12 +76,14 @@ function signIntent(params: Record<string, string>): string {
 }
 
 let app: ReturnType<typeof createApp>;
+let mockDb: ReturnType<typeof createMockSupabase>;
 beforeEach(() => {
   // mockReset (not clearAllMocks) — clearAllMocks leaves any unconsumed
   // mockResolvedValueOnce queued, which leaks a stale on-chain result into the
   // next test.
   mockedVerifyTransfer.mockReset();
-  app = createApp(createMockSupabase());
+  mockDb = createMockSupabase();
+  app = createApp(mockDb);
 });
 
 const originalFetch = globalThis.fetch;
@@ -194,6 +212,14 @@ describe("product is covered by the checkout-intent signature", () => {
 
     expect(res.status).toBe(200);
     expect((await res.json()).payment.plan_id).toBe("starter");
+
+    // The on-chain check MUST have been scoped to vibe's receiving wallet.
+    // Without this assertion the test was vacuous: `verifyTransfer` is mocked,
+    // so deleting `configForProduct` from the POST path still left it green.
+    expect(mockedVerifyTransfer).toHaveBeenCalledTimes(1);
+    const [, , scopedConfig] = mockedVerifyTransfer.mock.calls[0] as any[];
+    expect(scopedConfig.wallets.base).toBe("0xVibeBaseWallet");
+    expect(scopedConfig.prices.starter).toBe(12);
   });
 
   it("rejects an unknown product outright rather than falling back to openclaw", async () => {
@@ -329,10 +355,16 @@ describe("per-product plan resolution", () => {
     expect(resolveplan(120, config, "vibe")).toBe("max");
   });
 
-  it("treats absent/unknown product as openclaw", () => {
+  it("treats an ABSENT product as openclaw (legacy shape)", () => {
     expect(resolveplan(10, config)).toBe("starter");
     expect(resolveplan(10, config, undefined)).toBe("starter");
-    expect(resolveplan(10, config, "nope")).toBe("starter");
+    expect(resolveplan(10, config, "")).toBe("starter");
+  });
+
+  it("THROWS on an unknown product rather than pricing it as openclaw", () => {
+    // Silently falling back meant that removing a product from PRODUCTS while
+    // payments were pending re-priced them against openclaw's table.
+    expect(() => resolveplan(10, config, "nope")).toThrow(/Unknown product: nope/);
   });
 
   it("still accepts a bare price table (legacy call shape)", () => {
@@ -476,5 +508,470 @@ describe("branding and public config", () => {
 
     const vibe = await (await app.request("/tonconnect-manifest.json?product=vibe")).json();
     expect(vibe.name).toBe("Vibe Browser");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// (e) Canonical-string integrity: no value may forge a field boundary
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("canonical string is not forgeable by separator injection", () => {
+  const exp = () => String(Math.floor(Date.now() / 1000) + 1800);
+
+  /**
+   * The original bug. `URLSearchParams.entries()` returns DECODED values, so a
+   * raw "\n" inside `plan` passed straight through the old `k=v` join and
+   *
+   *     {plan: "starter\nproduct=vibe"}   ->  "plan=starter\nproduct=vibe"
+   *
+   * is byte-identical to the canonical string of
+   *
+   *     {plan: "starter", product: "vibe"}
+   *
+   * because `plan` sorts immediately before `product`. An attacker who could
+   * obtain a signature over the innocuous-looking single-field intent could
+   * replay it as a two-field intent that forges `product` — which selects the
+   * receiving wallet, the price table and the callback allowlist.
+   */
+  it("does not let a newline in a value forge an extra field (new format)", async () => {
+    const expTs = exp();
+    // Signed over ONE field whose value happens to contain a newline.
+    const injected = {
+      uid: "42",
+      idtype: "tg",
+      plan: "starter\nproduct=vibe",
+      amountUsd: "12.00",
+      exp: expTs,
+    };
+    const sig = signIntent(injected);
+
+    // Replayed as if it were TWO clean fields {plan: starter, product: vibe}.
+    const res = await app.request("/api/payment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        txHash: "0xinject1",
+        chainId: "base",
+        token: "usdc",
+        idType: "tg",
+        uid: "42",
+        plan: "starter",
+        product: "vibe",
+        amountUsd: "12.00",
+        exp: expTs,
+        sig,
+      }),
+    });
+
+    expect(res.status).toBe(401);
+    expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+  });
+
+  it("does not let a newline in a value forge an extra field (legacy format)", async () => {
+    const expTs = exp();
+    const injected = {
+      uid: "42",
+      idtype: "tg",
+      plan: "starter\nproduct=vibe",
+      amountUsd: "12.00",
+      exp: expTs,
+    };
+    // Signed with the OLD algorithm — the exact vector the legacy path must
+    // refuse. The legacy branch rejects any value containing "\n" or "=".
+    const sig = signIntentLegacy(injected);
+
+    const res = await app.request("/api/payment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        txHash: "0xinject2",
+        chainId: "base",
+        token: "usdc",
+        idType: "tg",
+        uid: "42",
+        plan: "starter",
+        product: "vibe",
+        amountUsd: "12.00",
+        exp: expTs,
+        sig,
+      }),
+    });
+
+    // NOTE: on the legacy path the split replay is byte-identical to a genuine
+    // `{plan:starter, product:vibe}` intent, so no value-level guard can tell
+    // them apart. It is refused because a legacy signature may never carry
+    // `product` at all — legacy signers predate multi-product.
+    expect(res.status).toBe(401);
+    expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+  });
+
+  it("rejects the injected intent even when submitted verbatim on the legacy path", async () => {
+    // Same signature, replayed with the newline value intact. The legacy path
+    // must still refuse it (values containing "\n" are structurally ambiguous),
+    // and the new path does not match because the signature is legacy-format.
+    const expTs = exp();
+    const injected = {
+      uid: "42",
+      idtype: "tg",
+      plan: "starter\nproduct=vibe",
+      amountUsd: "12.00",
+      exp: expTs,
+    };
+    const res = await app.request("/api/payment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        txHash: "0xinject3",
+        chainId: "base",
+        token: "usdc",
+        idType: "tg",
+        uid: "42",
+        plan: "starter\nproduct=vibe",
+        amountUsd: "12.00",
+        exp: expTs,
+        sig: signIntentLegacy(injected),
+      }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("does not let an '=' in a value shift a field boundary", async () => {
+    const expTs = exp();
+    // "uid=99" appended into plan. Under a naive parser the value could be read
+    // as terminating early; length-prefixing makes the extent explicit.
+    const injected = {
+      uid: "42",
+      idtype: "tg",
+      plan: "starter=x",
+      amountUsd: "12.00",
+      exp: expTs,
+    };
+    const sig = signIntent(injected);
+
+    // Replay claiming a different, shorter plan.
+    const res = await app.request("/api/payment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        txHash: "0xinject4",
+        chainId: "base",
+        token: "usdc",
+        idType: "tg",
+        uid: "42",
+        plan: "starter",
+        amountUsd: "12.00",
+        exp: expTs,
+        sig,
+      }),
+    });
+    expect(res.status).toBe(401);
+
+    // And the legacy path must refuse an "=" bearing value outright.
+    const res2 = await app.request("/api/payment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        txHash: "0xinject5",
+        chainId: "base",
+        token: "usdc",
+        idType: "tg",
+        uid: "42",
+        plan: "starter=x",
+        amountUsd: "12.00",
+        exp: expTs,
+        sig: signIntentLegacy(injected),
+      }),
+    });
+    expect(res2.status).toBe(401);
+  });
+
+  it("length-prefixed canonicalization separates the colliding pair", () => {
+    // Direct demonstration, independent of the HTTP layer.
+    const lp = (params: Record<string, string>) =>
+      [...new URLSearchParams(params).entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => `${k.length}:${k}=${v.length}:${v}`)
+        .join("\n");
+    const old = (params: Record<string, string>) =>
+      [...new URLSearchParams(params).entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => `${k}=${v}`)
+        .join("\n");
+
+    const a = { plan: "starter\nproduct=vibe" };
+    const b = { plan: "starter", product: "vibe" };
+
+    expect(old(a)).toBe(old(b)); // the vulnerability
+    expect(lp(a)).not.toBe(lp(b)); // fixed
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// (f) Backward compatibility with production's legacy signatures
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("legacy canonical signatures keep validating", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * Fixture produced by the OLD algorithm and HARDCODED here, so this test
+   * cannot pass merely because the current code agrees with itself.
+   *
+   * canonical: "amountUsd=10.00\nexp=2000000000\nidtype=tg\nplan=starter\nuid=42"
+   * hmac-sha256(key="test-callback-secret")
+   */
+  const LEGACY_EXP = "2000000000";
+  const LEGACY_SIG = "fd865542bc1c06e25d763b67586b63ffe3b431fafa7793fd09319b9163241a00";
+
+  it("accepts an intent signed with the pre-length-prefix algorithm", async () => {
+    // Freeze the clock before the fixture's exp so the fixed signature stays valid.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_900_000_000 * 1000));
+
+    mockedVerifyTransfer.mockResolvedValueOnce({
+      from: "0xSender",
+      to: "0xTestBaseWallet",
+      amountRaw: "10000000",
+      amountUsd: 10,
+      token: "usdc",
+      blockNumber: 1,
+      txHash: "0xlegacyok",
+    } as any);
+
+    const res = await app.request("/api/payment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        txHash: "0xlegacyok",
+        chainId: "base",
+        token: "usdc",
+        idType: "tg",
+        uid: "42",
+        plan: "starter",
+        amountUsd: "10.00",
+        exp: LEGACY_EXP,
+        sig: LEGACY_SIG,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).payment.plan_id).toBe("starter");
+  });
+
+  it("refuses a legacy signature for an email identity", async () => {
+    // Legacy signers always emitted idtype=tg. Honouring a legacy signature for
+    // an `email` identity would let a tg-signed intent be credited to the same
+    // uid in the email namespace.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_900_000_000 * 1000));
+
+    const res = await app.request("/api/payment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        txHash: "0xlegacyemail",
+        chainId: "base",
+        token: "usdc",
+        idType: "email",
+        uid: "42",
+        plan: "starter",
+        amountUsd: "10.00",
+        exp: LEGACY_EXP,
+        sig: LEGACY_SIG,
+      }),
+    });
+
+    expect(res.status).toBe(401);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// (g) idType is signed, so the signed-intent path works for email (vibe)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("signed-intent path supports email identities", () => {
+  const exp = () => String(Math.floor(Date.now() / 1000) + 1800);
+
+  it("round-trips an idType: 'email' signed intent", async () => {
+    const expTs = exp();
+    const signed = {
+      uid: "buyer@example.com",
+      idtype: "email",
+      plan: "starter",
+      amountUsd: "12.00",
+      product: "vibe",
+      exp: expTs,
+    };
+
+    mockedVerifyTransfer.mockResolvedValueOnce({
+      from: "0xSender",
+      to: "0xVibeBaseWallet",
+      amountRaw: "12000000",
+      amountUsd: 12,
+      token: "usdc",
+      blockNumber: 1,
+      txHash: "0xemailok",
+    } as any);
+
+    const res = await app.request("/api/payment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        txHash: "0xemailok",
+        chainId: "base",
+        token: "usdc",
+        idType: "email",
+        uid: "buyer@example.com",
+        plan: "starter",
+        amountUsd: "12.00",
+        product: "vibe",
+        exp: expTs,
+        sig: signIntent(signed),
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const [, , scopedConfig] = mockedVerifyTransfer.mock.calls[0] as any[];
+    expect(scopedConfig.wallets.base).toBe("0xVibeBaseWallet");
+  });
+
+  it("rejects an email intent whose idtype was signed as tg", async () => {
+    const expTs = exp();
+    // Signed as tg...
+    const signed = {
+      uid: "buyer@example.com",
+      idtype: "tg",
+      plan: "starter",
+      amountUsd: "12.00",
+      product: "vibe",
+      exp: expTs,
+    };
+    // ...submitted as email.
+    const res = await app.request("/api/payment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        txHash: "0xemailswap",
+        chainId: "base",
+        token: "usdc",
+        idType: "email",
+        uid: "buyer@example.com",
+        plan: "starter",
+        amountUsd: "12.00",
+        product: "vibe",
+        exp: expTs,
+        sig: signIntent(signed),
+      }),
+    });
+    expect(res.status).toBe(401);
+  });
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// (h) GET lazy re-verify re-validates the stored product
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("GET lazy re-verify validates meta.product", () => {
+  it("errors on a removed/unknown product instead of falling back to openclaw", async () => {
+    // Simulates a payment created while `ghost` was a configured product, then
+    // polled after `ghost` was removed from PRODUCTS. Previously
+    // `productConfig` coerced the unknown id to openclaw, so the pending
+    // payment silently re-verified against OPENCLAW's wallet and price table.
+    const payment = await insertPayment(mockDb, {
+      idType: "tg",
+      uid: "42",
+      txHash: "0xghostproduct",
+      chainId: "base",
+      token: "usdc",
+      amountRaw: "0",
+      amountUsd: 0,
+      planId: "starter",
+      metadata: { product: "ghost", checkoutIntentVerified: true },
+    } as any);
+
+    expect(payment.status).toBe("pending");
+
+    const res = await app.request(`/api/payment/${payment.id}`);
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/Unknown product: ghost/);
+    // Crucially: no on-chain check was attempted against openclaw's wallet.
+    expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+  });
+
+  it("still lazily re-verifies a known product against ITS wallet", async () => {
+    const payment = await insertPayment(mockDb, {
+      idType: "tg",
+      uid: "42",
+      txHash: "0xvibepending",
+      chainId: "base",
+      token: "usdc",
+      amountRaw: "0",
+      amountUsd: 0,
+      planId: "starter",
+      metadata: { product: "vibe", checkoutIntentVerified: true },
+    } as any);
+
+    mockedVerifyTransfer.mockResolvedValueOnce({
+      from: "0xSender",
+      to: "0xVibeBaseWallet",
+      amountRaw: "12000000",
+      amountUsd: 12,
+      token: "usdc",
+      blockNumber: 1,
+      txHash: "0xvibepending",
+    } as any);
+
+    const res = await app.request(`/api/payment/${payment.id}`);
+    expect(res.status).toBe(200);
+
+    const [, , scopedConfig] = mockedVerifyTransfer.mock.calls[0] as any[];
+    expect(scopedConfig.wallets.base).toBe("0xVibeBaseWallet");
+    expect(scopedConfig.prices.starter).toBe(12);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// (i) txHash is normalized, so one tx cannot become two rows / two callbacks
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("txHash normalization", () => {
+  it("treats differently-cased/padded hashes of one tx as a duplicate", async () => {
+    const post = (txHash: string) =>
+      app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash,
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          apiKey: "test-api-key",
+        }),
+      });
+
+    mockedVerifyTransfer.mockResolvedValue({
+      from: "0xSender",
+      to: "0xTestBaseWallet",
+      amountRaw: "10000000",
+      amountUsd: 10,
+      token: "usdc",
+      blockNumber: 1,
+      txHash: "0xabcdef",
+    } as any);
+
+    const first = await post("0xABCDEF");
+    expect(first.status).toBe(200);
+
+    // Same tx, lowercased and whitespace-padded — must be rejected as a
+    // duplicate rather than creating a second row and a second callback.
+    const second = await post("  0xabcdef  ");
+    expect(second.status).toBe(409);
+    expect((await second.json()).error).toMatch(/already submitted/i);
   });
 });

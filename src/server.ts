@@ -5,8 +5,11 @@ import { cors } from "hono/cors";
 import {
   loadConfig,
   productConfig,
+  productConfigOrDefault,
+  UnknownProductError,
   configForProduct,
   DEFAULT_PRODUCT,
+  type Config,
   type ChainId,
   type TokenId,
   TOKEN_ADDRESSES,
@@ -57,6 +60,72 @@ const db = createDB(config.supabaseUrl, config.supabaseKey);
  * from `productConfig(config, product).topupPrices`.
  */
 const TOPUP_PRICES: Record<string, number> = productConfig(config, DEFAULT_PRODUCT).topupPrices;
+
+/**
+ * Build the signed fields of a checkout intent as `[key, value]` pairs sorted
+ * by key. Shared by the signing and verifying paths so the two can never drift.
+ */
+export function buildIntentFields(input: {
+  uid: string;
+  idType?: string;
+  plan?: string;
+  topup?: string;
+  callbackUrl?: string;
+  tenantType?: string;
+  vmProvider?: string;
+  hostType?: string;
+  deploymentType?: string;
+  product?: string;
+  amountUsd?: string;
+  exp?: string;
+}): Array<[string, string]> {
+  const params = new URLSearchParams();
+  if (input.plan) params.set("plan", input.plan);
+  if (input.topup) params.set("topup", input.topup);
+  params.set("uid", input.uid);
+  params.set("idtype", input.idType || "tg");
+  if (input.amountUsd) params.set("amountUsd", input.amountUsd);
+  if (input.exp) params.set("exp", input.exp);
+  if (input.callbackUrl) params.set("callback", input.callbackUrl);
+  if (input.tenantType) {
+    params.set("tenantType", input.tenantType);
+    params.set("tenant", input.tenantType);
+  }
+  if (input.vmProvider) params.set("vmp", input.vmProvider);
+  if (input.hostType) params.set("hostType", input.hostType);
+  if (input.deploymentType) params.set("deploymentType", input.deploymentType);
+  if (input.product) params.set("product", input.product);
+  return [...params.entries()].sort(([a], [b]) => a.localeCompare(b));
+}
+
+/**
+ * Canonical string signed by the checkout-intent HMAC.
+ *
+ * Length-prefixed on BOTH key and value:
+ *
+ *     <keyLen>:<key>=<valueLen>:<value>   joined by "\n"
+ *
+ * e.g. `{plan:"starter", product:"vibe"}` =>
+ *     "4:plan=7:starter\n7:product=4:vibe"
+ *
+ * The length prefix makes a field boundary unforgeable: a reader knows exactly
+ * how many characters a value occupies before it looks for the next separator,
+ * so no character a value can contain — "\n", "=", ":" — can fabricate,
+ * truncate or absorb a neighbouring field.
+ *
+ * The previous form was a bare `${key}=${value}` join on "\n". Because
+ * `URLSearchParams.entries()` returns DECODED values, a raw newline inside a
+ * value passed straight through, and
+ *
+ *     {plan: "starter\nproduct=vibe"}
+ *
+ * canonicalized byte-identically to `{plan:"starter", product:"vibe"}` —
+ * `plan` sorts immediately before `product` — forging the `product` field that
+ * selects the price table, receiving wallet and callback allowlist.
+ */
+export function canonicalIntentString(fields: Array<[string, string]>): string {
+  return fields.map(([key, value]) => `${key.length}:${key}=${value.length}:${value}`).join("\n");
+}
 
 /**
  * Constant-time string comparison to prevent timing-based API key leaks.
@@ -142,38 +211,70 @@ export function createApp(injectedDb?: DB) {
      */
     product?: string;
     amountUsd?: string;
+    /** Identifier namespace for `uid` ("tg" | "email"). Part of the canonical string. */
+    idType?: string;
     exp?: string;
     sig?: string;
   }): boolean {
     if (!config.checkoutSecret || !input.exp || !input.sig) return false;
     const exp = Number(input.exp);
     if (!Number.isFinite(exp) || exp < Math.floor(Date.now() / 1000)) return false;
-    const params = new URLSearchParams();
-    if (input.plan) params.set("plan", input.plan);
-    if (input.topup) params.set("topup", input.topup);
-    params.set("uid", input.uid);
-    params.set("idtype", "tg");
-    if (input.amountUsd) params.set("amountUsd", input.amountUsd);
-    params.set("exp", input.exp);
-    if (input.callbackUrl) params.set("callback", input.callbackUrl);
-    if (input.tenantType) {
-      params.set("tenantType", input.tenantType);
-      params.set("tenant", input.tenantType);
-    }
-    if (input.vmProvider) params.set("vmp", input.vmProvider);
-    if (input.hostType) params.set("hostType", input.hostType);
-    if (input.deploymentType) params.set("deploymentType", input.deploymentType);
-    if (input.product) params.set("product", input.product);
-    const canonical = [...params.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, value]) => `${key}=${value}`)
-      .join("\n");
-    const expected = createHmac("sha256", config.checkoutSecret)
-      .update(canonical)
+
+    // `idtype` used to be hardcoded to "tg", which made the signed-intent auth
+    // path unusable for `email` identities (i.e. for the vibe product), forcing
+    // vibe onto the apiKey path where `product` is unsigned. It is now taken
+    // from the request and covered by the signature.
+    const idType = input.idType || "tg";
+
+    const fields = buildIntentFields({ ...input, idType });
+    const expectedNew = createHmac("sha256", config.checkoutSecret)
+      .update(canonicalIntentString(fields))
       .digest("hex");
-    const expectedBuffer = Buffer.from(expected);
-    const actualBuffer = Buffer.from(input.sig);
-    return expectedBuffer.length === actualBuffer.length && timingSafeEqual(expectedBuffer, actualBuffer);
+    if (timingSafeEqualStr(expectedNew, input.sig)) return true;
+
+    // ── Legacy canonical form (DEPRECATED) ────────────────────────────────
+    //
+    // Live OpenClawBot production signs with the old `k=v` + "\n" join, which
+    // is forgeable: `URLSearchParams.entries()` returns DECODED values, so a
+    // value containing a raw "\n" (or "=") can fabricate an extra field —
+    // e.g. `{plan:"starter\nproduct=vibe"}` canonicalizes byte-identically to
+    // `{plan:"starter", product:"vibe"}`, forging `product`.
+    //
+    // We keep accepting it ONLY for in-flight/legacy intents, and only when the
+    // injection vector is structurally absent: no value may contain "\n" or
+    // "=". Legitimate legacy values never do (uid/plan/product/exp are opaque
+    // tokens, and `callback` is percent-encoded by the signer).
+    //
+    // Legacy signers always emitted idtype=tg, so a legacy signature can never
+    // authorise an `email` identity — accepting one would let a tg-signed
+    // intent be credited to the same uid in the email namespace.
+    //
+    // TODO(remove-legacy-canonical): delete this branch once no signature
+    // produced by the pre-length-prefix algorithm can still be within its
+    // `exp` window — i.e. once every OpenClawBot deployment emitting the old
+    // format has been upgraded AND the longest checkout-intent TTL (30 min)
+    // has elapsed since that rollout completed.
+    if (idType !== "tg") return false;
+
+    // A legacy signature can never authorise a `product`. Legacy signers
+    // predate multi-product and never emitted the field, so a genuine legacy
+    // intent has no `product`. This is load-bearing, not merely tidy: the
+    // newline collision below is INDISTINGUISHABLE on the legacy path when
+    // replayed in its split form — a signature over
+    //   {plan: "starter\nproduct=vibe"}
+    // produces byte-identical legacy canonical bytes to
+    //   {plan: "starter", product: "vibe"}
+    // and the split form contains no "\n" for the value guard to catch.
+    // Refusing `product` outright on the legacy path removes the only field
+    // the collision can profitably forge (wallet / price table / allowlist).
+    if (input.product) return false;
+
+    const legacyFields = buildIntentFields({ ...input, idType: "tg" });
+    if (legacyFields.some(([, value]) => value.includes("\n") || value.includes("="))) return false;
+    const expectedLegacy = createHmac("sha256", config.checkoutSecret)
+      .update(legacyFields.map(([key, value]) => `${key}=${value}`).join("\n"))
+      .digest("hex");
+    return timingSafeEqualStr(expectedLegacy, input.sig);
   }
 
   // ── Shared verification finalization (POST verify + GET lazy re-verify) ────
@@ -292,7 +393,14 @@ export function createApp(injectedDb?: DB) {
   app.get("/api/config", (c) => {
     // `?product=` scopes wallets/prices to that product. Absent => openclaw,
     // so the existing SPA sees exactly what it saw before.
-    const p = productConfig(config, c.req.query("product"));
+    // Unknown product must not silently resolve to openclaw's wallets/prices:
+    // the SPA reads this to decide WHERE TO SEND FUNDS.
+    let p: ReturnType<typeof productConfig>;
+    try {
+      p = productConfig(config, c.req.query("product"));
+    } catch {
+      return c.json({ error: `Unknown product: ${c.req.query("product")}` }, 400);
+    }
     return c.json({
       product: p.id,
       productName: p.name,
@@ -514,10 +622,28 @@ export function createApp(injectedDb?: DB) {
       try {
         const meta0 = (payment.metadata ?? {}) as Record<string, unknown>;
         const metaProduct = typeof meta0.product === "string" ? meta0.product : undefined;
+        // Re-validate the stored product on THIS path too. `productConfig` now
+        // throws for an unknown id instead of coercing to openclaw, so removing
+        // a product from `PRODUCTS` while payments are pending can no longer
+        // silently re-verify them against openclaw's wallet and price table.
+        // Rethrown out of the surrounding try/catch would be swallowed as a
+        // transient RPC error, so it is surfaced explicitly as a 409 instead.
+        let scopedConfig: Config;
+        try {
+          scopedConfig = configForProduct(config, metaProduct);
+        } catch (e) {
+          if (e instanceof UnknownProductError) {
+            return c.json(
+              { error: `Unknown product: ${e.productId}`, payment },
+              409,
+            );
+          }
+          throw e;
+        }
         const result = await verifyTransfer(
           payment.tx_hash,
           payment.chain_id as ChainId,
-          configForProduct(config, metaProduct),
+          scopedConfig,
         );
         if (result && result !== "pending") {
           const meta = (payment.metadata ?? {}) as Record<string, unknown>;
@@ -863,7 +989,8 @@ export function createApp(injectedDb?: DB) {
   // ── TonConnect manifest (required for TON wallet integration) ─────────────
   app.get("/tonconnect-manifest.json", (c) => {
     const baseUrl = config.baseUrl || `${c.req.url.split("/tonconnect")[0]}`;
-    const brand = productConfig(config, c.req.query("product"));
+    // Cosmetic only (name/icon) — an unknown id must not 500 the manifest.
+    const brand = productConfigOrDefault(config, c.req.query("product"));
     return c.json({
       url: baseUrl,
       name: brand.name,
