@@ -9,11 +9,22 @@
  */
 export const DEFAULT_PRODUCT = "openclaw";
 
-export interface PriceTable {
-  starter: number;
-  pro: number;
-  max: number;
-}
+/**
+ * A product's plan set: plan name -> USD price.
+ *
+ * DELIBERATELY OPEN (a map, not a struct with fixed `starter`/`pro`/`max`
+ * fields). A fixed struct forced every product to have a `starter` plan, so a
+ * product that only sells `pro`/`max` still inherited openclaw's $10 `starter`
+ * price and `resolveplan` happily returned `"starter"` for a $10 payment. The
+ * consumer then rejected `plan:"starter"` as `unknown_plan` with a 400, and
+ * because a dropped callback is only logged and never redelivered, the money
+ * was taken and nothing was ever delivered.
+ *
+ * A product declares its own set with `PLANS_<PRODUCT>` (see `loadConfig`) and
+ * then contains EXACTLY those plans — it never inherits a plan it did not
+ * declare.
+ */
+export type PriceTable = Record<string, number>;
 
 export interface WalletTable {
   base: string;
@@ -86,6 +97,81 @@ const env = (key: string, fallback = ""): string => {
 const splitList = (raw: string): string[] =>
   raw.split(",").map((s) => s.trim()).filter(Boolean);
 
+/** Env-var-safe upper-cased form of an id: `base_sepolia` -> `BASE_SEPOLIA`. */
+const envKey = (name: string): string => name.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+
+/**
+ * Relative tolerance `resolveplan` uses when matching an on-chain USD amount to
+ * a plan price (1%).
+ */
+export const PLAN_MATCH_TOLERANCE = 0.01;
+
+/**
+ * Absolute slack (USD) assumed for DOWNSTREAM amount-based matching.
+ *
+ * This service resolves a plan with a RELATIVE band (`PLAN_MATCH_TOLERANCE`),
+ * but consumers of the callback may re-derive the plan with a small ABSOLUTE
+ * band instead. This repo cannot know a consumer's prices, and must not encode
+ * them; what it CAN do is refuse to accept a price table where two plans sit so
+ * close together that any reasonable amount-based matcher would be ambiguous.
+ */
+export const PLAN_ABSOLUTE_SLACK_USD = 1;
+
+/**
+ * Validate one product's price map: every price must be a positive finite
+ * number, and no two plans may have overlapping match bands.
+ *
+ * Overlapping bands make amount-based resolution AMBIGUOUS: the plan a payment
+ * resolves to then depends on iteration order rather than on the amount, and a
+ * downstream consumer matching with its own (possibly absolute) tolerance can
+ * disagree with us about the same payment. That disagreement is unrecoverable —
+ * the consumer 400s and the callback is never retried — so it is rejected at
+ * startup instead of being discovered in production.
+ *
+ * @returns human-readable problems; empty means valid.
+ */
+export function validatePriceTable(label: string, table: Record<string, number>): string[] {
+  const problems: string[] = [];
+  const entries = Object.entries(table);
+  if (entries.length === 0) {
+    problems.push(`${label}: no plans configured`);
+    return problems;
+  }
+  for (const [plan, price] of entries) {
+    if (!Number.isFinite(price) || price <= 0) {
+      problems.push(`${label}: plan "${plan}" has a non-positive/invalid price (${price})`);
+    }
+  }
+  for (let i = 0; i < entries.length; i++) {
+    for (let j = i + 1; j < entries.length; j++) {
+      const [planA, a] = entries[i];
+      const [planB, b] = entries[j];
+      if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b <= 0) continue;
+      const gap = Math.abs(a - b);
+      // Bands overlap under EITHER matcher: our relative one, or a downstream
+      // absolute one. `2 * SLACK` because each price carries ±SLACK.
+      const relativeSpan = a * PLAN_MATCH_TOLERANCE + b * PLAN_MATCH_TOLERANCE;
+      const absoluteSpan = 2 * PLAN_ABSOLUTE_SLACK_USD;
+      const required = Math.max(relativeSpan, absoluteSpan);
+      if (gap <= required) {
+        problems.push(
+          `${label}: plans "${planA}" ($${a}) and "${planB}" ($${b}) have overlapping match bands ` +
+            `(gap $${gap.toFixed(2)} <= $${required.toFixed(2)}) — an on-chain amount cannot be resolved to one plan unambiguously`,
+        );
+      }
+    }
+  }
+  return problems;
+}
+
+/** Thrown at startup when a configured price table is internally inconsistent. */
+export class InvalidPriceTableError extends Error {
+  constructor(public readonly problems: string[]) {
+    super(`Invalid price configuration:\n  - ${problems.join("\n  - ")}`);
+    this.name = "InvalidPriceTableError";
+  }
+}
+
 export function loadConfig(): Config {
   // Security startup warnings — logged once at boot so ops notices misconfiguration.
   if (!env("API_KEY")) {
@@ -108,8 +194,7 @@ export function loadConfig(): Config {
     starter: Number(env("PRICE_STARTER")) || 10,
     pro: Number(env("PRICE_PRO")) || 25,
     max: Number(env("PRICE_MAX")) || 100,
-  };
-  const baseTopupPrices: Record<string, number> = {
+  };  const baseTopupPrices: Record<string, number> = {
     small: Number(env("TOPUP_PRICE_SMALL")) || 5,
     medium: Number(env("TOPUP_PRICE_MEDIUM")) || 10,
     large: Number(env("TOPUP_PRICE_LARGE")) || 25,
@@ -129,29 +214,107 @@ export function loadConfig(): Config {
   if (!productIds.includes(DEFAULT_PRODUCT)) productIds.unshift(DEFAULT_PRODUCT);
 
   const products: Record<string, ProductConfig> = {};
+  const priceProblems: string[] = [];
+  const inheritedWallets: string[] = [];
   for (const id of productIds) {
-    const P = id.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+    const P = envKey(id);
     const num = (key: string, fallback: number) => Number(env(`${key}_${P}`)) || fallback;
+
+    // ── Plan set ────────────────────────────────────────────────────────────
+    //
+    // `PLANS_<PRODUCT>` declares the product's plan names, e.g.
+    // `PLANS_VIBE=pro,max`. Each declared plan is priced by
+    // `PRICE_<PLAN>_<PRODUCT>` (e.g. `PRICE_PRO_VIBE`), falling back to the
+    // flat `PRICE_<PLAN>` only when the flat var exists.
+    //
+    // A product that declares a plan set contains EXACTLY that set — it does
+    // NOT inherit openclaw's other plans. That is the whole point: vibe sells
+    // `pro`/`max`, so a $10 payment on vibe must resolve to `null`, never to
+    // openclaw's `starter`.
+    //
+    // With no `PLANS_<PRODUCT>` the product inherits the flat
+    // `PRICE_STARTER`/`PRICE_PRO`/`PRICE_MAX` table, optionally overridden per
+    // product — byte-for-byte the pre-existing behaviour.
+    const declaredPlans = splitList(env(`PLANS_${P}`));
+    let prices: PriceTable;
+    if (declaredPlans.length > 0) {
+      prices = {};
+      for (const plan of declaredPlans) {
+        const raw = env(`PRICE_${envKey(plan)}_${P}`) || env(`PRICE_${envKey(plan)}`);
+        const price = Number(raw);
+        if (!raw || !Number.isFinite(price) || price <= 0) {
+          priceProblems.push(
+            `product "${id}": plan "${plan}" is declared in PLANS_${P} but has no valid price ` +
+              `(set PRICE_${envKey(plan)}_${P})`,
+          );
+          continue;
+        }
+        prices[plan] = price;
+      }
+    } else {
+      prices = {
+        starter: num("PRICE_STARTER", basePrices.starter),
+        pro: num("PRICE_PRO", basePrices.pro),
+        max: num("PRICE_MAX", basePrices.max),
+      };
+    }
+    priceProblems.push(...validatePriceTable(`product "${id}" prices`, prices));
+
+    // ── Top-up packs ────────────────────────────────────────────────────────
+    // Same open-set treatment: `TOPUPS_<PRODUCT>=small,large` +
+    // `TOPUP_PRICE_<PACK>_<PRODUCT>`. Top-up packs are selected BY NAME (the
+    // signed `topup` field), not by amount, so an ambiguous-band check does not
+    // apply — but an undeclared pack must still not be inherited, otherwise a
+    // product would advertise a pack its consumer cannot credit.
+    const declaredTopups = splitList(env(`TOPUPS_${P}`));
+    let topupPrices: Record<string, number>;
+    if (declaredTopups.length > 0) {
+      topupPrices = {};
+      for (const pack of declaredTopups) {
+        const raw = env(`TOPUP_PRICE_${envKey(pack)}_${P}`) || env(`TOPUP_PRICE_${envKey(pack)}`);
+        const price = Number(raw);
+        if (!raw || !Number.isFinite(price) || price <= 0) {
+          priceProblems.push(
+            `product "${id}": top-up pack "${pack}" is declared in TOPUPS_${P} but has no valid price ` +
+              `(set TOPUP_PRICE_${envKey(pack)}_${P})`,
+          );
+          continue;
+        }
+        topupPrices[pack] = price;
+      }
+    } else {
+      topupPrices = {
+        small: num("TOPUP_PRICE_SMALL", baseTopupPrices.small),
+        medium: num("TOPUP_PRICE_MEDIUM", baseTopupPrices.medium),
+        large: num("TOPUP_PRICE_LARGE", baseTopupPrices.large),
+      };
+    }
+
+    // ── Wallets ─────────────────────────────────────────────────────────────
+    // A product with no `WALLET_<CHAIN>_<PRODUCT>` shares the global receiving
+    // wallet. That is intentional and stays supported — but it used to be
+    // SILENT, so a vibe deploy that forgot `WALLET_BASE_VIBE` quietly collected
+    // vibe's revenue into openclaw's wallet. Each inheritance is now named in a
+    // startup warning.
+    const walletFor = (chain: keyof WalletTable, fallback: string): string => {
+      const own = env(`WALLET_${envKey(chain)}_${P}`);
+      if (own) return own;
+      if (id !== DEFAULT_PRODUCT && fallback) inheritedWallets.push(`${id}/${chain}`);
+      return fallback;
+    };
+
     products[id] = {
       id,
       name: env(`PRODUCT_NAME_${P}`, id === DEFAULT_PRODUCT ? "OpenClaw Crypto Payments" : id),
       iconUrl: env(`PRODUCT_ICON_${P}`, "https://openclaw.ai/favicon.ico"),
-      prices: {
-        starter: num("PRICE_STARTER", basePrices.starter),
-        pro: num("PRICE_PRO", basePrices.pro),
-        max: num("PRICE_MAX", basePrices.max),
-      },
-      topupPrices: {
-        small: num("TOPUP_PRICE_SMALL", baseTopupPrices.small),
-        medium: num("TOPUP_PRICE_MEDIUM", baseTopupPrices.medium),
-        large: num("TOPUP_PRICE_LARGE", baseTopupPrices.large),
-      },
+      prices,
+      topupPrices,
       wallets: {
-        base: env(`WALLET_BASE_${P}`, baseWallets.base),
-        eth: env(`WALLET_ETH_${P}`, baseWallets.eth),
-        arbitrum: env(`WALLET_ARBITRUM_${P}`, baseWallets.arbitrum),
-        ton: env(`WALLET_TON_${P}`, baseWallets.ton),
-        sol: env(`WALLET_SOL_${P}`, baseWallets.sol),
+        base: walletFor("base", baseWallets.base),
+        eth: walletFor("eth", baseWallets.eth),
+        arbitrum: walletFor("arbitrum", baseWallets.arbitrum),
+        ton: walletFor("ton", baseWallets.ton),
+        sol: walletFor("sol", baseWallets.sol),
         base_sepolia: env(`WALLET_BASE_SEPOLIA_${P}`, env(`WALLET_BASE_${P}`, baseWallets.base_sepolia)),
         eth_sepolia: env(`WALLET_ETH_SEPOLIA_${P}`, env(`WALLET_ETH_${P}`, baseWallets.eth_sepolia)),
       },
@@ -160,6 +323,19 @@ export function loadConfig(): Config {
         return raw ? splitList(raw) : baseAllowlist;
       })(),
     };
+  }
+
+  // Fail LOUDLY rather than booting with a price table that silently
+  // misresolves payments. A misresolved plan is unrecoverable downstream: the
+  // consumer 400s on the unknown plan and the callback is never retried.
+  if (priceProblems.length > 0) throw new InvalidPriceTableError(priceProblems);
+
+  if (inheritedWallets.length > 0) {
+    console.warn(
+      `[CONFIG] Products inheriting the GLOBAL receiving wallet (no WALLET_<CHAIN>_<PRODUCT> set): ` +
+        `${inheritedWallets.join(", ")} — these funds land in the default product's wallet. ` +
+        `Set the per-product vars if this is not intended.`,
+    );
   }
 
   return {

@@ -241,9 +241,8 @@ export function createApp(injectedDb?: DB) {
     // `{plan:"starter", product:"vibe"}`, forging `product`.
     //
     // We keep accepting it ONLY for in-flight/legacy intents, and only when the
-    // injection vector is structurally absent: no value may contain "\n" or
-    // "=". Legitimate legacy values never do (uid/plan/product/exp are opaque
-    // tokens, and `callback` is percent-encoded by the signer).
+    // injection vector is structurally absent: no value may contain a line
+    // break (see the guard below for why "=" is deliberately allowed).
     //
     // Legacy signers always emitted idtype=tg, so a legacy signature can never
     // authorise an `email` identity — accepting one would let a tg-signed
@@ -269,8 +268,24 @@ export function createApp(injectedDb?: DB) {
     // the collision can profitably forge (wallet / price table / allowlist).
     if (input.product) return false;
 
+    // Guard the injection vector ONLY.
+    //
+    // The legacy encoding is `${key}=${value}` joined by "\n". To forge a field
+    // an attacker must start a NEW LINE inside a value, which requires "\n"
+    // (and "\r" is rejected with it, defensively, so no CR-normalizing layer
+    // between signer and verifier can manufacture one).
+    //
+    // "=" is NOT rejected. It cannot shift a field boundary here: the legacy
+    // string is never PARSED — it is recomputed from `buildIntentFields`, whose
+    // key set is a fixed hardcoded list ("plan", "uid", "idtype", "callback",
+    // …). Forging via "=" would require a key like `plan=a` to exist, and no
+    // such key can ever be produced. Rejecting "=" bought nothing and broke a
+    // real case: `buildIntentFields` puts the DECODED callbackUrl into the
+    // string, so ANY legacy intent whose callback carries a query string
+    // (`?a=b`) started 401'ing — a brand-new failure mode on the very branch
+    // whose purpose is to keep in-flight production intents working.
     const legacyFields = buildIntentFields({ ...input, idType: "tg" });
-    if (legacyFields.some(([, value]) => value.includes("\n") || value.includes("="))) return false;
+    if (legacyFields.some(([, value]) => value.includes("\n") || value.includes("\r"))) return false;
     const expectedLegacy = createHmac("sha256", config.checkoutSecret)
       .update(legacyFields.map(([key, value]) => `${key}=${value}`).join("\n"))
       .digest("hex");

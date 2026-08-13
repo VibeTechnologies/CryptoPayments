@@ -666,7 +666,10 @@ describe("canonical string is not forgeable by separator injection", () => {
     });
     expect(res.status).toBe(401);
 
-    // And the legacy path must refuse an "=" bearing value outright.
+    // The legacy path deliberately ALLOWS "=" in a value (it cannot shift a
+    // field boundary — the legacy string is recomputed from a fixed key set,
+    // never parsed). What it must still refuse is a REPLAY that splits the
+    // "="-bearing value into a different field set.
     const res2 = await app.request("/api/payment", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -676,7 +679,7 @@ describe("canonical string is not forgeable by separator injection", () => {
         token: "usdc",
         idType: "tg",
         uid: "42",
-        plan: "starter=x",
+        plan: "starter", // <- split: signature was over "starter=x"
         amountUsd: "12.00",
         exp: expTs,
         sig: signIntentLegacy(injected),
@@ -784,6 +787,56 @@ describe("legacy canonical signatures keep validating", () => {
     });
 
     expect(res.status).toBe(401);
+  });
+
+  it("accepts a legacy intent whose callback carries a query string", async () => {
+    // REGRESSION: the legacy guard used to reject any value containing "=".
+    // `buildIntentFields` puts the DECODED callbackUrl into the canonical
+    // string, so every in-flight production intent with a query string in its
+    // callback started 401'ing — a new failure mode on the branch that exists
+    // solely to keep those intents working. "=" cannot shift a field boundary
+    // (the legacy string is recomputed from a fixed key set, never parsed), so
+    // only line breaks are refused now.
+    const expTs = String(Math.floor(Date.now() / 1000) + 1800);
+    const callback = "https://admin.openclaw.agentlabs.cc/hook?a=b&c=d";
+    const fields = {
+      amountUsd: "10.00",
+      callback,
+      exp: expTs,
+      idtype: "tg",
+      plan: "starter",
+      uid: "42",
+    };
+
+    mockedVerifyTransfer.mockResolvedValueOnce({
+      from: "0xSender",
+      to: "0xTestBaseWallet",
+      amountRaw: "10000000",
+      amountUsd: 10,
+      token: "usdc",
+      blockNumber: 1,
+      txHash: "0xlegacyqs",
+    } as any);
+
+    const res = await app.request("/api/payment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        txHash: "0xlegacyqs",
+        chainId: "base",
+        token: "usdc",
+        idType: "tg",
+        uid: "42",
+        plan: "starter",
+        amountUsd: "10.00",
+        callbackUrl: callback,
+        exp: expTs,
+        sig: signIntentLegacy(fields),
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).payment.plan_id).toBe("starter");
   });
 });
 

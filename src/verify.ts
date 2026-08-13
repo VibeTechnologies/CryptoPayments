@@ -510,10 +510,25 @@ export function resolveplan(
   const prices: Config["prices"] = "products" in source
     ? productConfig(source as Config, product).prices
     : (source as Config["prices"]);
-  // Allow 1% tolerance for exchange rate variance
+  // Allow 1% tolerance for exchange rate variance.
+  //
+  // The table is an OPEN map, so only the plans THIS product actually declares
+  // are candidates. A product that sells `pro`/`max` has no `starter` entry and
+  // therefore can never resolve to `"starter"` for any amount — including
+  // openclaw's `starter` price. Previously the table was a fixed struct, every
+  // product inherited `starter`, and a $10 vibe payment resolved to a plan the
+  // consumer rejects as `unknown_plan` (with no callback retry, so the money
+  // was taken and nothing delivered).
+  //
+  // Descending price order preserves the previous max -> pro -> starter
+  // precedence. `validatePriceTable` rejects tables whose bands overlap, so at
+  // most one plan can match and the order is not load-bearing for correctness.
   const tolerance = 0.01;
-  if (Math.abs(amountUsd - prices.max) / prices.max <= tolerance) return "max";
-  if (Math.abs(amountUsd - prices.pro) / prices.pro <= tolerance) return "pro";
-  if (Math.abs(amountUsd - prices.starter) / prices.starter <= tolerance) return "starter";
+  const candidates = Object.entries(prices)
+    .filter(([, price]) => Number.isFinite(price) && price > 0)
+    .sort(([, a], [, b]) => b - a);
+  for (const [plan, price] of candidates) {
+    if (Math.abs(amountUsd - price) / price <= tolerance) return plan;
+  }
   return null;
 }

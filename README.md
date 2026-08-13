@@ -69,16 +69,71 @@ env var, so a product with no overrides shares OpenClaw's prices and wallets
 | Variable | Scope | Default |
 |---|---|---|
 | `PRODUCTS` | service | `openclaw` |
-| `PRICE_STARTER` / `PRICE_PRO` / `PRICE_MAX` | default product | `10` / `25` / `100` |
-| `PRICE_STARTER_<PRODUCT>` etc. | per product | the flat value above |
-| `TOPUP_PRICE_SMALL` / `_MEDIUM` / `_LARGE` | default product | `5` / `10` / `25` |
-| `TOPUP_PRICE_SMALL_<PRODUCT>` etc. | per product | the flat value above |
+| `PRICE_STARTER` / `PRICE_PRO` / `PRICE_MAX` | default plan set | `10` / `25` / `100` |
+| `PLANS_<PRODUCT>` | per product | *(unset — inherit the flat plan set)* |
+| `PRICE_<PLAN>_<PRODUCT>` | per product | flat `PRICE_<PLAN>`, else **startup error** |
+| `TOPUP_PRICE_SMALL` / `_MEDIUM` / `_LARGE` | default pack set | `5` / `10` / `25` |
+| `TOPUPS_<PRODUCT>` | per product | *(unset — inherit the flat pack set)* |
+| `TOPUP_PRICE_<PACK>_<PRODUCT>` | per product | flat `TOPUP_PRICE_<PACK>`, else **startup error** |
 | `WALLET_BASE`, `WALLET_ETH`, ... | default product | — |
-| `WALLET_BASE_<PRODUCT>`, ... | per product | the flat wallet above |
+| `WALLET_BASE_<PRODUCT>`, ... | per product | the flat wallet above (logs a startup WARNING) |
 | `CALLBACK_URL_ALLOWLIST` | default product | see `src/config.ts` |
 | `CALLBACK_URL_ALLOWLIST_<PRODUCT>` | per product | the flat allowlist above |
 | `PRODUCT_NAME_<PRODUCT>` | per product | the product id |
 | `PRODUCT_ICON_<PRODUCT>` | per product | `https://openclaw.ai/favicon.ico` |
+
+#### Per-product plan sets
+
+A product's plan set is **open**: plan names are not fixed to
+`starter`/`pro`/`max`. Declare a product's own set with `PLANS_<PRODUCT>` and
+price each declared plan with `PRICE_<PLAN>_<PRODUCT>`:
+
+```
+PRODUCTS=openclaw,vibe
+PLANS_VIBE=pro,max
+PRICE_PRO_VIBE=20
+PRICE_MAX_VIBE=99
+```
+
+A product that declares a plan set contains **exactly** that set — it does not
+inherit plans it did not declare. Above, `vibe` has no `starter`, so a $10
+payment on `vibe` resolves to *no plan* rather than to OpenClaw's `starter`.
+
+This matters because plans are resolved from the on-chain USD amount. With the
+old fixed `starter`/`pro`/`max` struct, every product inherited a `starter`
+plan, a $10 `vibe` payment was credited as `plan:"starter"`, and the consumer
+rejected it as `unknown_plan` — with no callback retry, so the payment settled
+on-chain and nothing was ever delivered.
+
+Omit `PLANS_<PRODUCT>` to keep the historical behaviour: the product inherits
+the flat `PRICE_STARTER`/`PRICE_PRO`/`PRICE_MAX` set, individually overridable
+per product. `TOPUPS_<PRODUCT>` works the same way for top-up packs.
+
+#### Startup validation
+
+`loadConfig()` **throws** rather than booting with a price table that could
+misresolve a payment:
+
+- a plan declared in `PLANS_<PRODUCT>` with no valid price;
+- a non-positive or non-finite price;
+- two plans in one product whose match bands overlap.
+
+Bands overlap when two prices are closer than the larger of this service's
+relative tolerance (1% of each price) and a downstream absolute tolerance
+(±$1 each). Overlapping bands make amount-based plan resolution ambiguous — the
+result depends on iteration order, and a consumer matching with its own
+tolerance can disagree with us about the same payment. That disagreement is
+unrecoverable (the consumer 400s and the callback is never retried), so it is
+refused at boot. This repo intentionally does **not** encode any consumer's
+prices; it only makes ambiguity impossible to configure silently.
+
+#### Wallet inheritance
+
+A product with no `WALLET_<CHAIN>_<PRODUCT>` still shares the global
+`WALLET_<CHAIN>` (a shared receiving wallet stays supported), but every such
+inheritance is now named in a startup `[CONFIG]` warning, so a deploy that
+forgets `WALLET_BASE_VIBE` no longer silently routes vibe's revenue into
+OpenClaw's wallet.
 
 Example — add vibebrowser with its own prices and Base wallet:
 
