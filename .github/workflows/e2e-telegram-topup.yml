@@ -74,3 +74,7 @@ jobs:
             tests/e2e-telegram-topup.spec.ts \
             tests/e2e-full-wallet-flow.spec.ts \
             --reporter=list
+
+      - name: Branch API diagnostics
+        if: always()
+        run: tail -n 200 /tmp/cryptopayments-api.log
