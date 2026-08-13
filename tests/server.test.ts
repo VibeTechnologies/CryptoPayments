@@ -591,7 +591,7 @@ describe("Server API", () => {
       expect(body.error).toContain("already submitted");
     });
 
-    it("marks payment failed when verification returns null", async () => {
+  it("keeps payment pending when verification cannot yet find the transaction", async () => {
       mockedVerifyTransfer.mockResolvedValueOnce(null);
 
       const res = await app.request("/api/payment", {
@@ -607,10 +607,10 @@ describe("Server API", () => {
         }),
       });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(202);
       const body = await res.json();
-      expect(body.error).toContain("not found");
-      expect(body.payment.status).toBe("failed");
+      expect(body.payment.status).toBe("pending");
+      expect(body.pending).toBe(true);
     });
 
     it("handles verification error gracefully", async () => {

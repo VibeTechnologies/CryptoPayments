@@ -492,9 +492,11 @@ export function createApp(injectedDb?: DB) {
       }
 
       if (!result) {
-        await markPaymentFailed(appDb, payment.id);
-        const updated = await getPaymentById(appDb, payment.id);
-        return c.json({ payment: updated, error: "Transfer not found or not to our wallet" }, 400);
+        // A newly-mined transaction can be absent from a public RPC/indexer for
+        // several seconds. Absence is not terminal proof: keep it pending so
+        // the SPA poll and scheduled reconciler can retry from chain truth.
+        const current = await getPaymentById(appDb, payment.id);
+        return c.json({ payment: current, pending: true }, 202);
       }
 
       // Top-up / plan validation + verification + webhook callback — shared
