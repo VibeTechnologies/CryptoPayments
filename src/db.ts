@@ -1,4 +1,10 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import {
+  computeNextState,
+  isDue,
+  type AttemptOutcome,
+  type CallbackDeliveryState,
+} from "./callback-delivery.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -557,6 +563,32 @@ export async function recordCallbackOutcome(
   callbackUrl: string | null,
   failureReason: string | null,
 ): Promise<void> {
+  await recordCallbackAttempt(
+    db,
+    paymentIntentId,
+    callbackUrl,
+    failureReason ? { ok: false, error: failureReason, permanent: true } : { ok: true },
+    Date.now(),
+  );
+}
+
+/**
+ * Persist ONE delivery attempt and schedule (or terminate) the next one.
+ *
+ * This is the durable half of redelivery: because the runtime is a
+ * request-scoped Supabase Edge Function, the ONLY thing that survives between
+ * attempts is this row. `callback_state.next_attempt_at` is the schedule;
+ * `drainDueCallbacks` on a later request is the scheduler.
+ *
+ * Never throws. Losing the audit write must not also lose the payment.
+ */
+export async function recordCallbackAttempt(
+  db: DB,
+  paymentIntentId: string,
+  callbackUrl: string | null,
+  outcome: AttemptOutcome,
+  nowMs: number = Date.now(),
+): Promise<CallbackDeliveryState | null> {
   try {
     const column = paymentIntentId.startsWith("pi_") ? "stripe_id" : "id";
     const { data } = await db
@@ -567,26 +599,78 @@ export async function recordCallbackOutcome(
 
     const existing = ((data as { metadata?: Record<string, unknown> } | null)?.metadata ??
       {}) as Record<string, unknown>;
-    const prior = (existing.callback_state ?? {}) as { attempts?: number };
+    const prior = (existing.callback_state ?? null) as Partial<CallbackDeliveryState> | null;
 
-    const callbackState = {
-      url: callbackUrl,
-      status: failureReason ? "failed" : "delivered",
-      attempts: (typeof prior.attempts === "number" ? prior.attempts : 0) + 1,
-      delivered_at: failureReason ? null : new Date().toISOString(),
-      last_attempt_at: new Date().toISOString(),
-      last_error: failureReason,
-    };
+    // A delivered payment is terminal: never re-send, never regress the state.
+    if (prior?.status === "delivered") return prior as CallbackDeliveryState;
+
+    const callbackState = computeNextState(prior, callbackUrl, outcome, nowMs);
 
     await db
       .from("payment_intents")
       .update({ metadata: { ...existing, callback_state: callbackState } })
       .eq(column, paymentIntentId);
+
+    return callbackState;
   } catch (err) {
     console.error(
-      `[recordCallbackOutcome] failed to persist callback state for ${paymentIntentId}: ` +
+      `[recordCallbackAttempt] failed to persist callback state for ${paymentIntentId}: ` +
         (err instanceof Error ? err.message : String(err)),
     );
+    return null;
+  }
+}
+
+/** Read the persisted delivery state for one payment. */
+export async function getCallbackState(
+  db: DB,
+  paymentIntentId: string,
+): Promise<Partial<CallbackDeliveryState> | null> {
+  try {
+    const column = paymentIntentId.startsWith("pi_") ? "stripe_id" : "id";
+    const { data } = await db
+      .from("payment_intents")
+      .select("metadata")
+      .eq(column, paymentIntentId)
+      .single();
+    const meta = ((data as { metadata?: Record<string, unknown> } | null)?.metadata ??
+      {}) as Record<string, unknown>;
+    return (meta.callback_state ?? null) as Partial<CallbackDeliveryState> | null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verified payments whose callback is `pending` and DUE for another attempt.
+ *
+ * Filtering happens client-side rather than as a jsonb SQL predicate on
+ * purpose: `metadata` has no jsonb index, the pending set is tiny (it is only
+ * non-empty when a consumer is actually broken), and a client-side filter keeps
+ * this working against the in-memory test double as well as PostgREST.
+ */
+export async function listDueCallbacks(
+  db: DB,
+  nowMs: number = Date.now(),
+  limit = 20,
+): Promise<PaymentIntentRecord[]> {
+  try {
+    const { data } = await db
+      .from("payment_intents")
+      .select("*")
+      .eq("status", "succeeded")
+      .order("created_at", { ascending: true })
+      .range(0, 199);
+
+    const rows = (data as PaymentIntentRecord[]) ?? [];
+    return rows
+      .filter((r) => isDue((r.metadata ?? {}).callback_state as Partial<CallbackDeliveryState>, nowMs))
+      .slice(0, limit);
+  } catch (err) {
+    console.error(
+      `[listDueCallbacks] query failed: ` + (err instanceof Error ? err.message : String(err)),
+    );
+    return [];
   }
 }
 

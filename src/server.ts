@@ -46,8 +46,16 @@ import {
   listWebhookEvents,
   createWebhookEvent,
   recordCallbackOutcome,
+  recordCallbackAttempt,
+  listDueCallbacks,
   type PaymentRecord,
+  type PaymentIntentRecord,
 } from "./db.ts";
+import {
+  buildSignedPayload,
+  type AttemptOutcome,
+  type CallbackDeliveryState,
+} from "./callback-delivery.ts";
 import { verifyTransfer, resolveplan } from "./verify.ts";
 import { verifyTelegramInitData } from "./telegram.ts";
 
@@ -161,6 +169,143 @@ export function createApp(injectedDb?: DB) {
     await next();
     const ms = Date.now() - start;
     console.log(`${c.req.method} ${c.req.path} ${c.res.status} ${ms}ms`);
+  });
+
+  // ── Opportunistic redelivery ────────────────────────────────────────────────
+  //
+  // THE SCHEDULER. A Supabase Edge Function is request-scoped: there is no
+  // process that outlives the response, so `setTimeout(retry, 60_000)` is
+  // silently dropped when the isolate is torn down. The only reliable clock we
+  // have is "another request arrived". So every inbound request opportunistically
+  // drains callbacks whose `next_attempt_at` has passed.
+  //
+  // Cheap by construction: `listDueCallbacks` returns [] unless a consumer is
+  // actually broken, and the drain is throttled to once per
+  // DRAIN_INTERVAL_MS per isolate so a burst of traffic cannot stampede a
+  // struggling consumer. It runs AFTER the response is produced and never
+  // rejects, so it can never affect the request that triggered it.
+  app.use("*", async (c, next) => {
+    await next();
+    if (c.req.path.startsWith("/api/admin/")) return; // admin drain is explicit
+    void maybeDrain();
+  });
+
+  const DRAIN_INTERVAL_MS = 15_000;
+  let lastDrainAt = 0;
+  let draining = false;
+
+  async function maybeDrain(): Promise<void> {
+    const now = Date.now();
+    if (draining || now - lastDrainAt < DRAIN_INTERVAL_MS) return;
+    draining = true;
+    lastDrainAt = now;
+    try {
+      await drainDueCallbacks();
+    } catch (err) {
+      console.error(`[callback-drain] failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      draining = false;
+    }
+  }
+
+  /**
+   * Retry every callback that is `pending` and due.
+   *
+   * Idempotent and safe to run concurrently with itself: `computeNextState`
+   * refuses to regress a `delivered` state, and a duplicate successful delivery
+   * is collapsed by the consumer's txHash dedupe.
+   */
+  async function drainDueCallbacks(
+    nowMs: number = Date.now(),
+  ): Promise<{ attempted: number; delivered: number; failed: number }> {
+    const due = await listDueCallbacks(appDb, nowMs);
+    let delivered = 0;
+    let failed = 0;
+
+    for (const pi of due) {
+      const meta = (pi.metadata ?? {}) as Record<string, unknown>;
+      const state = (meta.callback_state ?? {}) as Partial<CallbackDeliveryState>;
+      const url = state.url;
+      if (!url) continue;
+
+      const payment = await getPaymentById(appDb, pi.stripe_id);
+      if (!payment) continue;
+
+      const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+      let prod: ReturnType<typeof productConfig>;
+      try {
+        prod = productConfig(config, str(meta.product));
+      } catch {
+        // The product was removed from config while a delivery was pending.
+        // Retrying can never succeed — go terminal loudly rather than loop.
+        const outcome: AttemptOutcome = {
+          ok: false,
+          error: `unknown product "${String(meta.product)}" — cannot resolve callback allowlist`,
+          permanent: true,
+        };
+        const next = await recordCallbackAttempt(appDb, pi.stripe_id, url, outcome, nowMs);
+        logDeliveryOutcome(pi.stripe_id, payment.tx_hash, url, outcome, next);
+        failed++;
+        continue;
+      }
+
+      const outcome = await attemptCallback(
+        url,
+        payment,
+        {
+          topup: str(meta.topup),
+          tenantType: str(meta.tenantType),
+          vmProvider: str(meta.vmProvider),
+          hostType: str(meta.hostType),
+          deploymentType: str(meta.deploymentType),
+          product: prod.id,
+        },
+        prod.callbackAllowlist,
+      );
+      const next = await recordCallbackAttempt(appDb, pi.stripe_id, url, outcome, nowMs);
+      logDeliveryOutcome(pi.stripe_id, payment.tx_hash, url, outcome, next);
+      if (outcome.ok) delivered++;
+      else failed++;
+    }
+
+    return { attempted: due.length, delivered, failed };
+  }
+
+  /**
+   * Operator escape hatch: force a redelivery sweep NOW.
+   *
+   * Exists because the opportunistic drain only advances when traffic arrives —
+   * on a quiet night a stuck payment could sit until morning. Guarded by the
+   * same API key the bot already uses.
+   */
+  app.post("/api/admin/callbacks/redeliver", async (c) => {
+    if (!requireApiKey(c)) return c.json({ error: "Unauthorized" }, 401);
+    const result = await drainDueCallbacks();
+    return c.json({ ok: true, ...result });
+  });
+
+  /** Operator view: verified payments that are stuck or needing attention. */
+  app.get("/api/admin/callbacks/stuck", async (c) => {
+    if (!requireApiKey(c)) return c.json({ error: "Unauthorized" }, 401);
+    const pis = await listPaymentIntents(appDb, { limit: 200 });
+    const stuck = pis
+      .map((pi) => ({
+        pi,
+        state: ((pi.metadata ?? {}) as Record<string, unknown>).callback_state as
+          | Partial<CallbackDeliveryState>
+          | undefined,
+      }))
+      .filter(({ state }) => state && state.status !== "delivered")
+      .map(({ pi, state }) => ({
+        paymentId: pi.stripe_id,
+        txHash: pi.tx_hash,
+        status: state?.status ?? null,
+        attempts: state?.attempts ?? 0,
+        nextAttemptAt: state?.next_attempt_at ?? null,
+        terminalReason: state?.terminal_reason ?? null,
+        lastError: state?.last_error ?? null,
+      }));
+    return c.json({ count: stuck.length, stuck });
   });
 
   // ── API key auth middleware helper ─────────────────────────────────────────
@@ -359,30 +504,34 @@ export function createApp(injectedDb?: DB) {
 
     const verified = await getPaymentById(appDb, paymentId);
 
-    // ── Send webhook callback (fire-and-forget) ──
-    // Record the delivery OUTCOME, do not just fire and forget.
+    // ── Send webhook callback ──
     //
-    // The old form was `.catch(err => console.error(...))`, so a refused or
-    // failing callback left a `verified` payment with no webhook and no trace —
-    // OpenClabBot#3600. `callback_state` is what makes
-    // "settled but never delivered" queryable, and therefore alertable.
+    // Attempt ONCE inline, then persist the outcome so a failure is durable and
+    // REDELIVERABLE. Before this, a 5xx or a brief consumer outage meant the
+    // money was taken on-chain and the customer got nothing, forever, with only
+    // a log line. `callback_state` now carries attempts / next_attempt_at /
+    // terminal status, and `drainDueCallbacks` (below) retries it on a later
+    // request — the only scheduler a request-scoped Edge Function can have.
     if (ctx.callbackUrl && config.callbackSecret && verified) {
-      sendCallback(ctx.callbackUrl, verified, {
-        topup: ctx.topup,
-        tenantType: ctx.tenantType,
-        vmProvider: ctx.vmProvider,
-        hostType: ctx.hostType,
-        deploymentType: ctx.deploymentType,
-        product: product.id,
-      }, product.callbackAllowlist)
-        .then(() => recordCallbackOutcome(appDb, paymentId, ctx.callbackUrl!, null))
-        .catch((err) => {
-          const reason = err instanceof Error ? err.message : String(err);
-          console.error(`[PAYMENT-LOST] payment ${paymentId} verified but callback failed: ${reason}`);
-          return recordCallbackOutcome(appDb, paymentId, ctx.callbackUrl!, reason);
-        });
+      const outcome = await attemptCallback(
+        ctx.callbackUrl,
+        verified,
+        {
+          topup: ctx.topup,
+          tenantType: ctx.tenantType,
+          vmProvider: ctx.vmProvider,
+          hostType: ctx.hostType,
+          deploymentType: ctx.deploymentType,
+          product: product.id,
+        },
+        product.callbackAllowlist,
+      );
+      const state = await recordCallbackAttempt(appDb, paymentId, ctx.callbackUrl, outcome);
+      logDeliveryOutcome(paymentId, verified.tx_hash, ctx.callbackUrl, outcome, state);
     } else if (verified && !ctx.callbackUrl) {
       // No callback at all on a verified payment is also money-in-nothing-out.
+      // Nothing to retry — there is no address to retry TO — so it goes
+      // straight to the terminal `needs_attention` state an operator watches.
       console.error(
         `[PAYMENT-LOST] payment ${paymentId} is VERIFIED but carried NO callbackUrl — ` +
           `nothing will ever be provisioned for it.`,
@@ -1061,98 +1210,155 @@ async function hmacSha256Hex(secret: string, message: string): Promise<string> {
   return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function sendCallback(
+interface CallbackMetadata {
+  topup?: string;
+  tenantType?: string;
+  vmProvider?: string;
+  hostType?: string;
+  deploymentType?: string;
+  product?: string;
+}
+
+/**
+ * One delivery attempt that NEVER throws — it classifies.
+ *
+ * The throwing `sendCallback` below is kept as the public/legacy surface, but
+ * the retry machinery needs the *shape* of the failure (HTTP status vs network
+ * error vs structurally-undeliverable), because that is what decides whether
+ * retrying identical bytes could ever work.
+ */
+export async function attemptCallback(
   callbackUrl: string,
   payment: PaymentRecord,
-  metadata: {
-    topup?: string;
-    tenantType?: string;
-    vmProvider?: string;
-    hostType?: string;
-    deploymentType?: string;
-    product?: string;
-  } = {},
+  metadata: CallbackMetadata = {},
   allowlist: string[] = config.callbackAllowlist,
-): Promise<void> {
-  // SSRF guard: only POST to allowlisted HTTPS hosts.
+  nowMs: number = Date.now(),
+): Promise<AttemptOutcome> {
+  // ── SSRF guard: only POST to allowlisted HTTPS hosts. ──
+  // All three failures below are `permanent`: no amount of retrying makes a
+  // non-allowlisted host allowlisted. They must land in `needs_attention` so an
+  // operator fixes the config, not in `pending` where they burn retries.
   let parsedUrl: URL;
   try {
     parsedUrl = new URL(callbackUrl);
   } catch {
-    console.warn(`[SECURITY] sendCallback: not a valid URL — skipping: ${callbackUrl}`);
-    return;
+    return { ok: false, error: `not a valid URL: ${callbackUrl}`, permanent: true };
   }
   if (parsedUrl.protocol !== "https:") {
-    console.warn(`[SECURITY] sendCallback: URL must use HTTPS — skipping: ${callbackUrl}`);
-    return;
+    return { ok: false, error: `callback URL must use HTTPS: ${callbackUrl}`, permanent: true };
   }
   if (!allowlist.includes(parsedUrl.hostname)) {
-    // A settled payment whose webhook is dropped is money in with nothing out.
-    // This used to be console.warn + return, which is why OpenClawBot#3600
-    // survived: the payment stayed `verified`, no webhook fired, no retry
-    // existed, and NOTHING recorded that a delivery had been refused. Keep the
-    // SSRF guard — it is correct — but make the drop impossible to miss.
     console.error(
       `[PAYMENT-LOST] sendCallback REFUSED for payment ${payment.id}: host ` +
         `"${parsedUrl.hostname}" is not in CALLBACK_URL_ALLOWLIST ` +
         `(${allowlist.join(", ")}). The payment is VERIFIED but the ` +
-        `customer will receive NOTHING and there is no retry. Add the host to ` +
+        `customer will receive NOTHING. Add the host to ` +
         `CALLBACK_URL_ALLOWLIST, or stop the caller from signing intents for it.`,
     );
-    throw new CallbackNotDeliverableError(
-      `callback host "${parsedUrl.hostname}" is not allowlisted`,
-    );
+    return {
+      ok: false,
+      error: `callback host "${parsedUrl.hostname}" is not allowlisted`,
+      permanent: true,
+    };
   }
 
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  const payload = JSON.stringify({
-    event: "payment.verified",
-    payment: {
-      id: payment.id,
-      idType: payment.id_type,
-      uid: payment.uid,
-      plan: payment.plan_id ?? undefined,
-      topup: payment.topup_id ?? undefined,
-      chain: payment.chain_id,
-      token: payment.token,
-      amountUsd: payment.amount_usd,
-      txHash: payment.tx_hash,
-      ...(metadata.topup ? { topup: metadata.topup } : {}),
-      ...(metadata.tenantType ? { tenantType: metadata.tenantType } : {}),
-      ...(metadata.vmProvider ? { vmProvider: metadata.vmProvider } : {}),
-      ...(metadata.hostType ? { hostType: metadata.hostType } : {}),
-      ...(metadata.deploymentType ? { deploymentType: metadata.deploymentType } : {}),
-      // Always present so the consumer knows which product was paid for;
-      // defaults to "openclaw", which is what every pre-existing caller is.
-      product: metadata.product ?? DEFAULT_PRODUCT,
+  // ── Payload ──
+  // Everything here is a pure function of the PAYMENT, so it is byte-identical
+  // across attempts — most importantly `payment.txHash`, which is the key the
+  // consumer dedupes on. Only `timestamp` (added by `buildSignedPayload`)
+  // differs per attempt; see the long note in callback-delivery.ts for why that
+  // is required rather than merely convenient.
+  const { payload, timestamp } = buildSignedPayload(
+    {
+      event: "payment.verified",
+      payment: {
+        id: payment.id,
+        idType: payment.id_type,
+        uid: payment.uid,
+        plan: payment.plan_id ?? undefined,
+        topup: payment.topup_id ?? undefined,
+        chain: payment.chain_id,
+        token: payment.token,
+        amountUsd: payment.amount_usd,
+        txHash: payment.tx_hash,
+        ...(metadata.topup ? { topup: metadata.topup } : {}),
+        ...(metadata.tenantType ? { tenantType: metadata.tenantType } : {}),
+        ...(metadata.vmProvider ? { vmProvider: metadata.vmProvider } : {}),
+        ...(metadata.hostType ? { hostType: metadata.hostType } : {}),
+        ...(metadata.deploymentType ? { deploymentType: metadata.deploymentType } : {}),
+        // Always present so the consumer knows which product was paid for;
+        // defaults to "openclaw", which is what every pre-existing caller is.
+        product: metadata.product ?? DEFAULT_PRODUCT,
+      },
     },
-    timestamp,
-  });
+    nowMs,
+  );
 
   const signature = await hmacSha256Hex(config.callbackSecret, payload);
 
-  const resp = await fetch(callbackUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Signature": signature,
-      "X-Timestamp": timestamp,
-    },
-    body: payload,
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(callbackUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Signature": signature,
+        "X-Timestamp": timestamp,
+      },
+      body: payload,
+    });
+  } catch (err) {
+    // No response at all: DNS failure, connection refused, TLS error, timeout.
+    // Always retryable — the consumer never saw the payload.
+    return { ok: false, error: `network error: ${err instanceof Error ? err.message : String(err)}` };
+  }
 
   if (!resp.ok) {
-    console.error(
-      `[PAYMENT-LOST] Callback to ${callbackUrl} FAILED for payment ${payment.id}: ` +
-        `${resp.status} ${resp.statusText}. The payment is VERIFIED but the customer ` +
-        `will receive NOTHING until this is redelivered.`,
-    );
-    throw new CallbackNotDeliverableError(
-      `callback POST returned ${resp.status} ${resp.statusText}`,
-    );
+    return {
+      ok: false,
+      status: resp.status,
+      error: `callback POST returned ${resp.status} ${resp.statusText}`,
+    };
   }
-  console.log(`Callback sent for payment ${payment.id}`);
+  return { ok: true };
 }
+
+/**
+ * Make a delivery outcome findable by an operator.
+ *
+ * `[PAYMENT-STUCK]` + the txHash is the alert hook: a terminal, undelivered
+ * callback means real money is sitting in our wallet with nothing credited, and
+ * only a human can resolve it. The txHash is included because it is the one
+ * identifier that is the same on-chain, in our DB, and in the consumer's.
+ */
+function logDeliveryOutcome(
+  paymentId: string,
+  txHash: string,
+  callbackUrl: string | null,
+  outcome: AttemptOutcome,
+  state: CallbackDeliveryState | null,
+): void {
+  if (outcome.ok) {
+    console.log(`Callback delivered for payment ${paymentId} (tx ${txHash})`);
+    return;
+  }
+  if (state?.status === "needs_attention") {
+    console.error(
+      `[PAYMENT-STUCK] reason=${state.terminal_reason} payment=${paymentId} ` +
+        `tx=${txHash} url=${callbackUrl} attempts=${state.attempts} ` +
+        `lastStatus=${state.last_status} lastError=${outcome.error}. ` +
+        `The payment is VERIFIED and will NOT be retried again. ` +
+        `A human must credit this customer manually.`,
+    );
+    return;
+  }
+  console.warn(
+    `[PAYMENT-RETRY] payment=${paymentId} tx=${txHash} attempt=${state?.attempts ?? "?"} ` +
+      `nextAttemptAt=${state?.next_attempt_at ?? "?"} error=${outcome.error}`,
+  );
+}
+
+
 
 // ── Module exports ───────────────────────────────────────────────────────────
 
