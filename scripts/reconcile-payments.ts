@@ -9,6 +9,8 @@ if (!baseUrl || !apiKey) {
 
 type Intent = {
   id: string;
+  customer_id?: string | null;
+  tx_hash?: string | null;
   status: string;
   created_at: string;
   metadata?: { callback_state?: { status?: string } };
@@ -18,6 +20,7 @@ async function request(path: string, init?: RequestInit) {
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
     headers: { "x-api-key": apiKey, "content-type": "application/json", ...init?.headers },
+    signal: AbortSignal.timeout(15_000),
   });
   const body = await response.json().catch(() => ({}));
   return { response, body };
@@ -35,7 +38,7 @@ for (const status of ["processing", "requires_payment_method", "succeeded"]) {
     for (const intent of intents) {
       const stale = Date.now() - Date.parse(intent.created_at) >= maxAgeMinutes * 60_000;
       const callbackStatus = intent.metadata?.callback_state?.status;
-      if (stale && (status !== "succeeded" || callbackStatus !== "delivered")) {
+      if (stale && intent.customer_id && intent.tx_hash && (status !== "succeeded" || callbackStatus !== "delivered")) {
         candidates.set(intent.id, intent);
       }
     }

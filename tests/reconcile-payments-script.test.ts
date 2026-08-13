@@ -40,7 +40,7 @@ describe("scheduled payment reconciler", () => {
       requests.push(`${req.method} ${req.url}`);
       res.setHeader("content-type", "application/json");
       if (req.url?.includes("status=processing")) {
-        res.end(JSON.stringify({ data: [{ id: "pi_stale", status: "processing", created_at: "2020-01-01T00:00:00Z" }] }));
+        res.end(JSON.stringify({ data: [{ id: "pi_stale", customer_id: "cus_1", tx_hash: "0xstale", status: "processing", created_at: "2020-01-01T00:00:00Z" }] }));
       } else if (req.method === "POST" && req.url === "/v1/payment_intents/pi_stale/reconcile") {
         res.end(JSON.stringify({ ok: true, action: "verified_and_delivered" }));
       } else {
@@ -59,6 +59,8 @@ describe("scheduled payment reconciler", () => {
       if (req.url?.includes("status=succeeded")) {
         res.end(JSON.stringify({ data: [{
           id: "pi_undelivered",
+          customer_id: "cus_2",
+          tx_hash: "0xundelivered",
           status: "succeeded",
           created_at: "2020-01-01T00:00:00Z",
           metadata: { callback_state: { status: "failed" } },

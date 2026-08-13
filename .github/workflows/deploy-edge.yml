@@ -33,8 +33,17 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - run: pnpm test
       - run: pnpm predeploy:edge
       - name: Deploy Edge Function
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: pnpm exec supabase functions deploy crypto-payments --project-ref krjbwbvmrpazdmmjstzo --no-verify-jwt
+      - name: Verify deployed admin route
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          code=$(curl -sS -o /tmp/status.json -w '%{http_code}' \
+            -H "x-api-key: $API_KEY" \
+            https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments/v1/payment_intents/by_tx/deploy-probe-not-found)
+          test "$code" = 404

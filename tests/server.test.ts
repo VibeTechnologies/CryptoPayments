@@ -277,6 +277,12 @@ describe("Server API", () => {
         needs_action: "verify_chain",
         callback: { status: "not_attempted", attempts: 0 },
       });
+
+      const withoutChain = await app.request("/v1/payment_intents/by_tx/0xstatus", {
+        headers: { "x-api-key": "test-api-key" },
+      });
+      expect(withoutChain.status).toBe(200);
+      expect(await withoutChain.json()).toMatchObject({ chain_id: "eth_sepolia", tx_hash: "0xstatus" });
     });
 
     it("re-verifies a pending intent and waits for callback delivery", async () => {
@@ -629,10 +635,10 @@ describe("Server API", () => {
         }),
       });
 
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(503);
       const body = await res.json();
       expect(body.error).toContain("RPC timeout");
-      expect(body.payment.status).toBe("failed");
+      expect(body.payment.status).toBe("pending");
     });
 
     it("accepts base_sepolia as valid chainId", async () => {

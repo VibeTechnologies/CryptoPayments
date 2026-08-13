@@ -482,6 +482,17 @@ export async function getPaymentIntentByTx(
   return (data as PaymentIntentRecord) ?? null;
 }
 
+export async function getPaymentIntentsByTxHash(
+  db: DB,
+  txHash: string,
+): Promise<PaymentIntentRecord[]> {
+  const { data } = await db
+    .from("payment_intents")
+    .select("*")
+    .eq("tx_hash", txHash);
+  return (data as PaymentIntentRecord[]) ?? [];
+}
+
 export async function listPaymentIntents(
   db: DB,
   opts: { customerId?: string; status?: string; limit?: number; offset?: number } = {},

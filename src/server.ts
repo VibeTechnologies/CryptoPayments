@@ -28,6 +28,7 @@ import {
   createPaymentIntent,
   getPaymentIntentById,
   getPaymentIntentByTx,
+  getPaymentIntentsByTxHash,
   listPaymentIntents,
   updatePaymentIntentStatus,
   createCheckoutSession,
@@ -519,10 +520,9 @@ export function createApp(injectedDb?: DB) {
       return c.json({ payment: outcome.payment });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      await markPaymentFailed(appDb, payment.id);
       return c.json(
         { error: `Verification failed: ${msg}`, payment: await getPaymentById(appDb, payment.id) },
-        500,
+        503,
       );
     }
   });
@@ -811,6 +811,16 @@ export function createApp(injectedDb?: DB) {
     const intent = await getPaymentIntentByTx(appDb, txHash, chain);
     if (!intent) return c.json({ error: "Payment intent not found" }, 404);
     return c.json(paymentIntentStatus(intent));
+  });
+
+  app.get("/v1/payment_intents/by_tx/:txHash", async (c) => {
+    if (!requireApiKey(c)) return c.json({ error: "Unauthorized" }, 401);
+    const txHash = c.req.param("txHash");
+    if (!txHash || txHash.length > 128) return c.json({ error: "Invalid transaction hash" }, 400);
+    const intents = await getPaymentIntentsByTxHash(appDb, txHash);
+    if (intents.length === 0) return c.json({ error: "Payment intent not found" }, 404);
+    if (intents.length > 1) return c.json({ error: "Transaction hash is ambiguous across chains" }, 409);
+    return c.json(paymentIntentStatus(intents[0]));
   });
 
   app.post("/v1/payment_intents/:id/reconcile", async (c) => {
