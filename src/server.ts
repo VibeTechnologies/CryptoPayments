@@ -500,6 +500,26 @@ export function createApp(injectedDb?: DB) {
     return c.json({ payments });
   });
 
+  // ── Effective callback allowlist (introspection) ───────────────────────────
+
+  /**
+   * Report the allowlist THIS RUNNING INSTANCE loaded.
+   *
+   * The allowlist is the single thing standing between a settled payment and a
+   * black hole (#3600), and until now it was invisible from outside the
+   * process: it comes from an env var with a code default, so "is the new host
+   * allowed?" could only be answered by reading a deploy config and hoping the
+   * running instance agreed. Both #3600 outages were exactly that gap.
+   *
+   * A domain cutover needs to verify the answer, not assume it, so the value is
+   * readable here — API-key gated, because the list also describes our internal
+   * callback topology. Hostnames only; never the callback secret.
+   */
+  app.get("/api/callback-allowlist", (c) => {
+    if (!requireApiKey(c)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json({ hosts: config.callbackAllowlist });
+  });
+
   // ══════════════════════════════════════════════════════════════════════════
   // STRIPE-LIKE v1 API
   // ══════════════════════════════════════════════════════════════════════════
