@@ -1,0 +1,45 @@
+name: Reconcile crypto payments
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: crypto-payment-reconciliation
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - id: reconcile
+        continue-on-error: true
+        env:
+          CRYPTO_PAYMENTS_API_URL: https://krjbwbvmrpazdmmjstzo.supabase.co/functions/v1/crypto-payments
+          API_KEY: ${{ secrets.API_KEY }}
+        run: pnpm reconcile:payments
+      - if: steps.reconcile.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="ALERT: crypto payment reconciliation failed"
+          body="Scheduled reconciliation failed or could not reach provider state. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          number=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then gh issue comment "$number" --body "$body"; else gh issue create --title "$title" --body "$body"; fi
+      - if: steps.reconcile.outcome == 'failure'
+        run: exit 1

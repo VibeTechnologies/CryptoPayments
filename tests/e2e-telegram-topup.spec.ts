@@ -100,6 +100,16 @@ test.beforeAll(async () => {
 });
 
 test('telegram /topup flow: checkout URL → mock wallet → real edge → Payment verified!', async ({ page }) => {
+  const branchApi = process.env.BRANCH_API_URL;
+  if (branchApi) {
+    await page.route(url => url.pathname.includes('/api/'), async route => {
+      const source = new URL(route.request().url());
+      console.log('[test] proxying API request to branch:', source.pathname);
+      const response = await route.fetch({ url: `${branchApi}${source.pathname.replace(/^.*\/api/, '/api')}${source.search}` });
+      if (!response.ok()) console.log('[test] branch API error:', response.status(), await response.text());
+      await route.fulfill({ response });
+    });
+  }
   const exp = Math.floor(Date.now() / 1000) + 3600;
   const sig = signIntent(secret, { uid: TEST_UID, topup: TEST_TOPUP, amountUsd: AMOUNT_USD, callbackUrl: CALLBACK_URL, exp });
 

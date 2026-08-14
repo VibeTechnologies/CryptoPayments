@@ -63,6 +63,16 @@ function signIntent(secret: string, opts: {
 test.setTimeout(180_000); // tx broadcast + 12s block + polling
 
 test('full wallet flow: pending tx → 202 → spinner → poll → Payment verified!', async ({ page }) => {
+  const branchApi = process.env.BRANCH_API_URL;
+  if (branchApi) {
+    await page.route(url => url.pathname.includes('/api/'), async route => {
+      const source = new URL(route.request().url());
+      console.log('[test] proxying API request to branch:', source.pathname);
+      const response = await route.fetch({ url: `${branchApi}${source.pathname.replace(/^.*\/api/, '/api')}${source.search}` });
+      if (!response.ok()) console.log('[test] branch API error:', response.status(), await response.text());
+      await route.fulfill({ response });
+    });
+  }
   // ── Wallet setup ──
   const secret = process.env.CHECKOUT_SECRET ?? '';
   if (!secret) throw new Error('CHECKOUT_SECRET env var required');
