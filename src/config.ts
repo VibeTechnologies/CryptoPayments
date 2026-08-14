@@ -103,9 +103,16 @@ export function loadConfig(): Config {
     // Do not prune an entry here just because it looks unused: this list is the
     // only thing standing between a settled payment and a black hole, and
     // nothing in either service detects a drop.
+    //
+    // `admin.agentpod.agentlabs.cc` is the AGE-135 cutover target. It is here
+    // only because a callback-shaped POST signed with the live CALLBACK_SECRET
+    // was observed reaching OpenClawBot's handler on that host from the public
+    // internet (400 "missing txHash" on a valid signature, 401 on a tampered
+    // one, matching pod log) — not because the name looks right. Adding a host
+    // that 404s or 308s would reproduce #3600 with extra steps.
     callbackAllowlist: env(
       "CALLBACK_URL_ALLOWLIST",
-      "admin.openclaw.agentlabs.cc,admin.openclaw.vibebrowser.app,pay.agentlabs.cc",
+      "admin.openclaw.agentlabs.cc,admin.openclaw.vibebrowser.app,pay.agentlabs.cc,admin.agentpod.agentlabs.cc",
     ).split(",").map((s) => s.trim()).filter(Boolean),
   };
 }

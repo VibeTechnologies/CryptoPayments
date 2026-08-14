@@ -27,6 +27,16 @@
 import { describe, it, expect } from "vitest";
 import { loadConfig } from "../src/config.ts";
 
+// `src/server.ts` builds a Supabase client at module scope, so the env it needs
+// must exist before the dynamic import below. Kept to the minimum: this file is
+// a config contract, not a server test.
+process.env.SUPABASE_URL ??= "https://test.supabase.co";
+process.env.SUPABASE_SERVICE_ROLE_KEY ??= "test-service-role-key";
+process.env.API_KEY ??= "test-api-key";
+process.env.CALLBACK_SECRET ??= "test-callback-secret";
+
+const { createApp } = await import("../src/server.ts");
+
 /**
  * Every host OpenClawBot can legitimately build a crypto callback for.
  *
@@ -40,6 +50,11 @@ const OPENCLAWBOT_CALLBACK_HOSTS = [
   "admin.openclaw.agentlabs.cc",
   // Still live, and what PUBLIC_BASE_URL pointed at before the fix.
   "admin.openclaw.vibebrowser.app",
+  // AGE-135 cutover target. OpenClawBot lists this in its own
+  // CRYPTO_CALLBACK_ALLOWED_HOSTS, so an intent signed for it would pass that
+  // service's fail-closed check and then be refused HERE — the silent shape of
+  // #3600, with the two services disagreeing in the other direction.
+  "admin.agentpod.agentlabs.cc",
 ];
 
 describe("callback allowlist — cross-service contract with OpenClawBot", () => {
@@ -82,5 +97,19 @@ describe("callback allowlist — cross-service contract with OpenClawBot", () =>
     // not to widen the SSRF boundary until it stopped complaining.
     expect(allowlist).not.toContain("console.openclaw.agentlabs.cc");
     expect(allowlist).not.toContain("console.openclaw.vibebrowser.app");
+  });
+
+  it("is readable from the running instance, API-key gated", async () => {
+    // The allowlist being un-observable is why both #3600 outages needed a
+    // production payment to discover. A cutover has to be able to ASK.
+    const app = createApp();
+    const unauth = await app.request("/api/callback-allowlist");
+    expect(unauth.status).toBe(401);
+
+    const authed = await app.request("/api/callback-allowlist", {
+      headers: { "x-api-key": loadConfig().apiKey },
+    });
+    expect(authed.status).toBe(200);
+    expect(await authed.json()).toEqual({ hosts: allowlist });
   });
 });
