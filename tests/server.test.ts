@@ -1756,4 +1756,101 @@ describe("Server API", () => {
       expect(webhookCalls.length).toBe(1);
     });
   });
+
+  // ── Terminal-failure / confirmed-transfer invariant check (AGE-988) ───────
+  //
+  // AGE-986's post-mortem found two production rows sitting in `failed` with
+  // a `tx_hash` that DID resolve to a confirmed on-chain transfer, and no
+  // check ever caught it. This regression test reproduces exactly that shape
+  // against GET /api/admin/integrity-check: a synthetic `failed` row whose
+  // tx_hash the (mocked) verifier reports as confirmed must flip the
+  // endpoint red (409, ok:false, violations non-empty) — never silently 200.
+
+  describe("GET /api/admin/integrity-check", () => {
+    it("rejects without a valid API key", async () => {
+      const res = await app.request("/api/admin/integrity-check");
+      expect(res.status).toBe(401);
+    });
+
+    it("is green (ok:true, no violations) when no failed payment has a confirmed transfer", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce("pending");
+      const postRes = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xstill_pending_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "91",
+          plan: "starter",
+          apiKey: "test-api-key",
+        }),
+      });
+      const paymentId = (await postRes.json()).payment.id;
+      await (mockDb as any)
+        .from("payment_intents")
+        .update({ status: "failed" })
+        .eq("tx_hash", "0xstill_pending_tx");
+
+      // The invariant check re-queries the chain for this failed row; the
+      // mocked verifier says still-pending (not confirmed) — no violation.
+      mockedVerifyTransfer.mockResolvedValueOnce("pending");
+      const res = await app.request("/api/admin/integrity-check", {
+        headers: { "x-api-key": "test-api-key" },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.violations).toEqual([]);
+    });
+
+    it("AGE-988 regression: a `failed` payment whose tx_hash resolves to a CONFIRMED transfer trips the check red", async () => {
+      // Reproduces the exact shape of the two live rows AGE-986 found
+      // (pi_b20ad22cf80342b8bbccd833184a3994 / pi_16e3e4b10d914acd8abb11bd263da831):
+      // status=failed, amount=0, tx_hash present, and the chain actually has a
+      // confirmed transfer for it.
+      mockedVerifyTransfer.mockResolvedValueOnce("pending");
+      const postRes = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xshould_have_settled_tx",
+          chainId: "eth_sepolia",
+          token: "usdc",
+          idType: "tg",
+          uid: "92",
+          plan: "starter",
+          apiKey: "test-api-key",
+        }),
+      });
+      const paymentId = (await postRes.json()).payment.id;
+      await (mockDb as any)
+        .from("payment_intents")
+        .update({ status: "failed", amount: 0 })
+        .eq("tx_hash", "0xshould_have_settled_tx");
+
+      // The invariant check re-queries the chain: this time the verifier
+      // reports a CONFIRMED transfer for a payment we have on file as failed.
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "100000000",
+        amountUsd: 100,
+        token: "usdc",
+        blockNumber: 12345,
+        txHash: "0xshould_have_settled_tx",
+      });
+
+      const res = await app.request("/api/admin/integrity-check", {
+        headers: { "x-api-key": "test-api-key" },
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.violations.length).toBe(1);
+      expect(body.violations[0].stripe_id).toBe(paymentId);
+      expect(body.violations[0].tx_hash).toBe("0xshould_have_settled_tx");
+    });
+  });
 });

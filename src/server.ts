@@ -609,6 +609,79 @@ export function createApp(injectedDb?: DB) {
     return c.json(summary);
   });
 
+  // ── Terminal-failure / confirmed-transfer invariant check (AGE-988) ──────
+  //
+  // Detection-only, read-only, never mutates a row. Invariant: no
+  // payment_intent in the terminal `failed` state may have a tx_hash that
+  // resolves to a CONFIRMED on-chain transfer. If one does, the payment was
+  // marked failed in error (or a since-mined/late-observed confirmation) and
+  // the customer's money moved while the payment sits unrecovered — exactly
+  // what AGE-986's sweep found already happened twice in production, with no
+  // check ever catching it. Flags violations for a human/AGE-986-style
+  // manual reconciliation; does NOT touch markPaymentFailed() or verify.ts
+  // (out of scope per AGE-988 / AGE-970).
+  app.get("/api/admin/integrity-check", async (c) => {
+    if (!requireApiKey(c)) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+
+    const limit = Number(c.req.query("limit")) || 500;
+    const pageSize = 200;
+
+    const summary = {
+      checked: 0,
+      violations: [] as Array<{
+        stripe_id: string;
+        tx_hash: string;
+        chain_id: string;
+        amount: number;
+        confirmed: unknown;
+      }>,
+      errors: [] as string[],
+    };
+
+    let offset = 0;
+    outer: for (;;) {
+      const page = await listPaymentIntents(appDb, { status: "failed", limit: pageSize, offset });
+      if (page.length === 0) break;
+
+      for (const pi of page) {
+        if (!pi.tx_hash || !pi.chain_id) continue;
+        if (summary.checked >= limit) break outer;
+        summary.checked++;
+
+        try {
+          const result = await verifyTransfer(pi.tx_hash, pi.chain_id as ChainId, config, {
+            totalBudgetMs: RPC_SWEEP_BUDGET_CRON_MS,
+          });
+          if (result && result !== "pending") {
+            // A confirmed transfer exists for a payment we recorded as
+            // failed — the invariant is violated.
+            summary.violations.push({
+              stripe_id: pi.stripe_id,
+              tx_hash: pi.tx_hash,
+              chain_id: pi.chain_id,
+              amount: pi.amount,
+              confirmed: result,
+            });
+          }
+          // result === null (no matching transfer / reverted) or "pending"
+          // (not yet confirmed) — invariant holds, nothing to flag.
+        } catch (err) {
+          // RPC exhausted / transient — inconclusive, NOT a violation. Surface
+          // it so a human can re-run rather than silently skipping the row.
+          summary.errors.push(`${pi.stripe_id}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      if (page.length < pageSize) break;
+      offset += pageSize;
+    }
+
+    const ok = summary.violations.length === 0;
+    return c.json({ ok, ...summary }, ok ? 200 : 409);
+  });
+
   // ── User payment history (legacy) ──────────────────────────────────────────
 
   app.get("/api/payments", async (c) => {
