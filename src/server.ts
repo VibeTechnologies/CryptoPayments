@@ -45,6 +45,7 @@ import {
   RPC_SWEEP_BUDGET_CRON_MS,
 } from "./verify.ts";
 import { verifyTelegramInitData } from "./telegram.ts";
+import { getCounterSnapshot } from "./metrics.ts";
 
 const config = loadConfig();
 const db = createDB(config.supabaseUrl, config.supabaseKey);
@@ -680,6 +681,20 @@ export function createApp(injectedDb?: DB) {
 
     const ok = summary.violations.length === 0;
     return c.json({ ok, ...summary }, ok ? 200 : 409);
+  });
+
+  // ── RPC retry/exhaustion counters (AGE-1069 / AGE-970 decision item 4) ────
+  //
+  // Process-local in-memory counters (see src/metrics.ts) for every retry
+  // attempt and every full sweep-budget exhaustion inside withRpcFailover,
+  // broken down by chain. The founder ruling on AGE-970 asked for this
+  // number to be inspectable so a return of "exhaustion is non-zero in
+  // steady state" is a measurement, not an opinion.
+  app.get("/api/admin/metrics", async (c) => {
+    if (!requireApiKey(c)) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+    return c.json(getCounterSnapshot());
   });
 
   // ── User payment history (legacy) ──────────────────────────────────────────

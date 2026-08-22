@@ -537,6 +537,74 @@ describe("withRpcFailover sweep layer (opts.totalBudgetMs)", () => {
   });
 });
 
+// ── RPC retry/exhaustion counters (AGE-1069 / AGE-970 decision item 4) ─────
+
+describe("withRpcFailover metrics counters", () => {
+  beforeEach(async () => {
+    const { __resetCountersForTest } = await import("../src/metrics.js");
+    __resetCountersForTest();
+  });
+
+  it("increments rpc_retry_attempts_total on a mid-retry success, tagged by chain", async () => {
+    const { withRpcFailover } = await import("../src/verify.js");
+    const { getCounterSnapshot } = await import("../src/metrics.js");
+    let calls = 0;
+    const result = await withRpcFailover(
+      ["https://a"],
+      async (url) => {
+        calls++;
+        if (calls < 2) throw new Error("ETIMEDOUT");
+        return `ok:${url}`;
+      },
+      { chainId: "eth" },
+    );
+    expect(result).toBe("ok:https://a");
+    const snapshot = getCounterSnapshot();
+    expect(snapshot.rpcRetryAttempts.eth).toBe(1);
+    expect(snapshot.rpcRetryAttemptsTotal).toBe(1);
+    expect(snapshot.rpcExhaustionsTotal).toBe(0);
+  });
+
+  it("increments rpc_exhaustions_total when the sweep budget is fully exhausted, tagged by chain", async () => {
+    const { withRpcFailover, TransientVerificationError } = await import("../src/verify.js");
+    const { getCounterSnapshot } = await import("../src/metrics.js");
+    await expect(
+      withRpcFailover(
+        ["https://a", "https://b"],
+        async () => {
+          throw new Error("network timeout");
+        },
+        { chainId: "base" },
+      ),
+    ).rejects.toBeInstanceOf(TransientVerificationError);
+    const snapshot = getCounterSnapshot();
+    expect(snapshot.rpcExhaustions.base).toBe(1);
+    expect(snapshot.rpcExhaustionsTotal).toBe(1);
+    // Every transient catch (2 endpoints x 3 attempts) counted as a retry attempt.
+    expect(snapshot.rpcRetryAttempts.base).toBe(6);
+  });
+
+  it("does not increment exhaustion counter on success, and tags multiple chains independently", async () => {
+    const { withRpcFailover } = await import("../src/verify.js");
+    const { getCounterSnapshot } = await import("../src/metrics.js");
+    await withRpcFailover(["https://a"], async () => "ok", { chainId: "eth" });
+    let calls = 0;
+    await withRpcFailover(
+      ["https://a"],
+      async () => {
+        calls++;
+        if (calls < 2) throw new Error("ETIMEDOUT");
+        return "ok";
+      },
+      { chainId: "base" },
+    );
+    const snapshot = getCounterSnapshot();
+    expect(snapshot.rpcExhaustionsTotal).toBe(0);
+    expect(snapshot.rpcRetryAttempts.eth ?? 0).toBe(0);
+    expect(snapshot.rpcRetryAttempts.base).toBe(1);
+  });
+});
+
 // ── Helper: build a Config object for testing ──
 
 function makeConfig(wallets?: Partial<Record<string, string>>) {

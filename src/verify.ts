@@ -2,6 +2,7 @@ import { createPublicClient, http, parseAbiItem, type Address, formatUnits } fro
 import { arbitrum, base, baseSepolia, mainnet, sepolia } from "viem/chains";
 import type { ChainId, Config } from "./config.ts";
 import { TOKEN_ADDRESSES } from "./config.ts";
+import { recordRpcRetryAttempt, recordRpcExhaustion } from "./metrics.ts";
 
 /** ERC-20 Transfer event signature */
 const TRANSFER_EVENT = parseAbiItem(
@@ -137,6 +138,7 @@ export async function withRpcFailover<T>(
         } catch (err) {
           lastErr = err;
           if (!isTransientRpcError(err)) throw err;
+          recordRpcRetryAttempt(chainLabel);
           const elapsed = Date.now() - start;
           if (elapsed >= totalBudgetMs) break;
           if (attempt < RETRY_ATTEMPTS_PER_ENDPOINT) {
@@ -162,6 +164,7 @@ export async function withRpcFailover<T>(
     await sleep(delay);
   }
   const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+  recordRpcExhaustion(chainLabel);
   throw new TransientVerificationError(
     `All ${rpcUrls.length} RPC endpoint(s) failed after retry${sweep > 0 ? ` across ${sweep + 1} sweeps` : ""}: ${msg}`,
     lastErr,
