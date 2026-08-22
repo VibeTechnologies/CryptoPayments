@@ -1,0 +1,63 @@
+name: Payments integrity check (AGE-988)
+
+# AGE-986's post-mortem found two production payment_intents rows sitting in
+# the terminal `failed` state whose recorded tx_hash actually resolved to a
+# CONFIRMED on-chain transfer — i.e. the customer's money moved and the
+# system told them (and us) it hadn't. AGE-986 assumed a
+# payments-integrity.yml with a 6-hourly cron already existed; it did not (no
+# such file, no such cron, on main or any fetched branch — confirmed before
+# writing this). This workflow is that missing check, built fresh.
+#
+# Invariant enforced: no payment_intent with status='failed' may have a
+# tx_hash that resolves to a confirmed on-chain transfer. Detection only —
+# never mutates a row (see GET /api/admin/integrity-check in src/server.ts).
+#
+# On violation: the job goes red AND a human is paged, reusing the exact
+# Telegram+Sentry pattern already built for red-main alerting
+# (.github/workflows/alert-red-main.yml / .github/scripts/alert-red-main.sh,
+# AGE-971/AGE-964) via .github/scripts/payments-integrity-check.sh. A red job
+# nobody is told about is the AGE-964 failure repeating — do not remove the
+# notify step.
+#
+# Schedule: every 2 hours. AGE-988 asked for "6-hourly matches the ticket's
+# original ask, but use your judgement — more frequent is fine given this
+# write path is a proven money-loss vector" — this is the same write path
+# that has now silently mis-recorded two real customer payments (AGE-986),
+# so tightening the detection window is deliberate, not scope creep.
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  integrity-check:
+    runs-on: ubuntu-latest
+    env:
+      CRYPTO_PAYMENTS_URL: ${{ secrets.CRYPTO_PAYMENTS_URL }}
+      CRYPTO_PAYMENTS_API_KEY: ${{ secrets.CRYPTO_PAYMENTS_API_KEY }}
+      TG_TOKEN: ${{ secrets.CI_NOTIFY_BOT_TOKEN }}
+      TG_ADMINS: ${{ secrets.ADMIN_TELEGRAM_IDS }}
+      SENTRY_DSN: ${{ secrets.SENTRY_CI_DSN }}
+      SENTRY_CI_DEDUP_STATE: .sentry-ci-dedup.json
+    steps:
+      - name: Checkout (for shared alert scripts)
+        uses: actions/checkout@v4
+
+      - name: Restore Sentry CI dedup state
+        uses: actions/cache/restore@v4
+        with:
+          path: .sentry-ci-dedup.json
+          key: sentry-ci-dedup-${{ github.run_id }}
+          restore-keys: |
+            sentry-ci-dedup-
+
+      - name: Run failed/confirmed-transfer invariant check
+        run: bash .github/scripts/payments-integrity-check.sh
+
+      - name: Save Sentry CI dedup state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .sentry-ci-dedup.json
+          key: sentry-ci-dedup-${{ github.run_id }}
