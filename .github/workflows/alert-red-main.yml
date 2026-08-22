@@ -1,0 +1,80 @@
+name: Alert on red main
+
+# AGE-971: CryptoPayments had NO alert-on-red-main workflow. Two weeks of red
+# `E2E – Telegram top-up` on main paged nobody — there was never a wire run to
+# this repo. AgentPod's `.github/workflows/auto-revert-red-main.yml` +
+# `.github/scripts/alert-red-main.sh` is the proven pattern; this is that
+# pattern ported to CryptoPayments and parameterized (via the `workflows:`
+# list below) to watch every workflow that runs on `main` here: `CI`,
+# `E2E – Telegram top-up`, `E2E – Mobile Wallet QR Modal`.
+#
+# Policy (same as AgentPod, intentional): NEVER auto-revert a branch because a
+# test/CI run failed. This workflow is ALERT-ONLY — it surfaces a red
+# post-merge run to admins (Telegram) and on the offending PR so a human/agent
+# decides fix-forward vs manual revert.
+#
+# No cross-run dedup cache layer here (unlike AgentPod, which also has a
+# `notify-on-failure` job inside its `CI / CD` run itself and needs a shared
+# claim to avoid double-paging) — CryptoPayments' CI workflows have no
+# equivalent in-run notifier, so the SHA/PR-marker dedup already built into
+# alert-red-main.sh (see that script) is the only dedup needed.
+
+on:
+  workflow_run:
+    workflows:
+      - "CI"
+      - "E2E – Telegram top-up"
+      - "E2E – Mobile Wallet QR Modal"
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  alert-red-main:
+    # Only on a FAILED post-merge (push) run on main.
+    if: >-
+      github.repository_owner == 'VibeTechnologies' &&
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      TG_TOKEN: ${{ secrets.CI_NOTIFY_BOT_TOKEN }}
+      TG_ADMINS: ${{ secrets.ADMIN_TELEGRAM_IDS }}
+      SENTRY_DSN: ${{ secrets.SENTRY_CI_DSN }}
+      SENTRY_CI_DEDUP_STATE: .sentry-ci-dedup.json
+    steps:
+      - name: Checkout main (read-only, for commit subject)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Cross-run Sentry-POST cooldown state (same idiom as AgentPod's
+      # auto-revert-red-main.yml).
+      - name: Restore Sentry CI dedup state
+        uses: actions/cache/restore@v4
+        with:
+          path: .sentry-ci-dedup.json
+          key: sentry-ci-dedup-${{ github.run_id }}
+          restore-keys: |
+            sentry-ci-dedup-
+
+      - name: Alert on red main (NO auto-revert)
+        run: bash .github/scripts/alert-red-main.sh
+
+      - name: Save Sentry CI dedup state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .sentry-ci-dedup.json
+          key: sentry-ci-dedup-${{ github.run_id }}
