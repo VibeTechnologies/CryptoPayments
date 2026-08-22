@@ -32,6 +32,97 @@ const TOKEN_DECIMALS: Record<"usdt" | "usdc" | "ausd", number> = {
 
 export type VerifyResult = VerifiedTransfer | null | "pending";
 
+/**
+ * Thrown when verification could not be COMPLETED (RPC timeout, network
+ * error, 5xx, rate-limit) after exhausting bounded retry across every
+ * configured endpoint. Callers must treat this as "try again later", never
+ * as "payment failed" — a mined, correctly-paid transfer must not be
+ * recorded as a negative verification result just because every free public
+ * RPC endpoint happened to be slow tonight (AGE-960 / GH#49).
+ */
+export class TransientVerificationError extends Error {
+  constructor(message: string, readonly cause?: unknown) {
+    super(message);
+    this.name = "TransientVerificationError";
+  }
+}
+
+const RETRY_ATTEMPTS_PER_ENDPOINT = 3;
+const RETRY_BASE_DELAY_MS = 300;
+const RETRY_MAX_TOTAL_MS = 10_000;
+
+function isTransientRpcError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|network|fetch failed|abort|socket hang up|HeadersTimeoutError|UND_ERR|\b5\d\d\b|rate.?limit|too many requests|429/i.test(
+    msg,
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+/**
+ * Run `fn(url)` against each RPC endpoint in `rpcUrls`, in order. Within one
+ * endpoint, retry up to `RETRY_ATTEMPTS_PER_ENDPOINT` times with exponential
+ * backoff (capped at `RETRY_MAX_TOTAL_MS` total across ALL endpoints/retries)
+ * on a transient-looking error before failing over to the next endpoint.
+ *
+ * A non-transient error (e.g. "tx not found", a hard revert signal, a
+ * programming error) is rethrown immediately without retry or failover —
+ * that is a real, complete answer, not an infrastructure hiccup.
+ *
+ * If every endpoint is exhausted, throws `TransientVerificationError`.
+ */
+export async function withRpcFailover<T>(
+  rpcUrls: string[],
+  fn: (url: string) => Promise<T>,
+): Promise<T> {
+  if (rpcUrls.length === 0) {
+    throw new Error("No RPC endpoints configured");
+  }
+  const start = Date.now();
+  let lastErr: unknown;
+  for (const url of rpcUrls) {
+    for (let attempt = 1; attempt <= RETRY_ATTEMPTS_PER_ENDPOINT; attempt++) {
+      try {
+        return await fn(url);
+      } catch (err) {
+        lastErr = err;
+        if (!isTransientRpcError(err)) throw err;
+        const elapsed = Date.now() - start;
+        if (elapsed >= RETRY_MAX_TOTAL_MS) break;
+        if (attempt < RETRY_ATTEMPTS_PER_ENDPOINT) {
+          const delay = Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_TOTAL_MS - elapsed);
+          await sleep(delay);
+        }
+      }
+    }
+  }
+  const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+  throw new TransientVerificationError(
+    `All ${rpcUrls.length} RPC endpoint(s) failed after retry: ${msg}`,
+    lastErr,
+  );
+}
+
+/**
+ * `fetch` wrapped with the same bounded retry as `withRpcFailover`, for the
+ * TON/SOL verification paths which call a single fetch-based API rather than
+ * a viem client. No multi-endpoint failover here (single provider per
+ * chain), but a timeout/network blip/5xx no longer surfaces as an immediate
+ * throw into the terminal-failure catch in server.ts.
+ */
+export async function fetchWithRetry(url: string, init?: RequestInit): Promise<Response> {
+  return withRpcFailover([url], async (u) => {
+    const resp = await fetch(u, { ...init, signal: init?.signal ?? AbortSignal.timeout(10_000) });
+    if (resp.status >= 500 || resp.status === 429) {
+      throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    }
+    return resp;
+  });
+}
+
 export interface VerifiedTransfer {
   from: string;
   to: string;
@@ -59,7 +150,7 @@ export async function verifyEvmTransfer(
     : chainId === "base" ? base
     : chainId === "arbitrum" ? arbitrum
     : mainnet;
-  const rpcUrl = chainId === "base_sepolia" ? config.rpc.base_sepolia
+  const rpcUrls = chainId === "base_sepolia" ? config.rpc.base_sepolia
     : chainId === "eth_sepolia" ? config.rpc.eth_sepolia
     : chainId === "base" ? config.rpc.base
     : chainId === "arbitrum" ? config.rpc.arbitrum
@@ -74,18 +165,19 @@ export async function verifyEvmTransfer(
     throw new Error(`No wallet configured for chain ${chainId}`);
   }
 
-  const client = createPublicClient({
-    chain,
-    transport: http(rpcUrl),
-  });
+  const clientFor = (url: string) => createPublicClient({ chain, transport: http(url) });
 
-  // Get transaction receipt — may throw if tx is not yet mined
-  let receipt: Awaited<ReturnType<typeof client.getTransactionReceipt>>;
+  // Get transaction receipt — may throw if tx is not yet mined, or if the RPC
+  // endpoint times out/errors (AGE-960: the latter must NOT be conflated with
+  // "not yet mined" or bubble up as an unclassified throw — withRpcFailover
+  // retries/fails-over first, then re-raises as TransientVerificationError).
+  let receipt: Awaited<ReturnType<ReturnType<typeof clientFor>["getTransactionReceipt"]>>;
   try {
-    receipt = await client.getTransactionReceipt({
-      hash: txHash as `0x${string}`,
-    });
+    receipt = await withRpcFailover(rpcUrls, (url) =>
+      clientFor(url).getTransactionReceipt({ hash: txHash as `0x${string}` }),
+    );
   } catch (err) {
+    if (err instanceof TransientVerificationError) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     if (/could not be found|not found/i.test(msg)) {
       return "pending";
@@ -99,7 +191,7 @@ export async function verifyEvmTransfer(
 
   // Confirmation-count gate: protect against block reorganisations.
   // Testnets use 1 so a freshly mined tx passes immediately.
-  const currentBlock = await client.getBlockNumber();
+  const currentBlock = await withRpcFailover(rpcUrls, (url) => clientFor(url).getBlockNumber());
   const confirmations = Number(currentBlock - receipt.blockNumber) + 1;
   if (confirmations < MIN_CONFIRMATIONS[chainId]) {
     return "pending"; // not yet confirmed — caller can retry
@@ -173,9 +265,8 @@ export async function verifyTonTransfer(
   const apiBase = config.rpc.ton.replace(/\/+$/, "");
   const url = `${apiBase}/transactions?hash=${encodeURIComponent(txHash)}&limit=1`;
 
-  const resp = await fetch(url, {
+  const resp = await fetchWithRetry(url, {
     headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(10000),
   });
 
   if (!resp.ok) {
@@ -218,9 +309,8 @@ export async function verifyTonTransfer(
   //
   // We use the /jetton/transfers endpoint for easier parsing
   const jettonUrl = `${apiBase}/jetton/transfers?transaction_hash=${encodeURIComponent(txHash)}&limit=10`;
-  const jettonResp = await fetch(jettonUrl, {
+  const jettonResp = await fetchWithRetry(jettonUrl, {
     headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(10000),
   });
 
   if (!jettonResp.ok) {
@@ -291,7 +381,7 @@ export async function verifySolTransfer(
   }
 
   // Solana JSON-RPC: getTransaction with jsonParsed encoding
-  const resp = await fetch(config.rpc.sol, {
+  const resp = await fetchWithRetry(config.rpc.sol, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
