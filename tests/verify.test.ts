@@ -221,14 +221,23 @@ describe("verifyTonTransfer", () => {
       ),
     );
 
-    // Second call: /jetton/transfers — server error → must throw, not return null
-    mockFetch.mockResolvedValueOnce(
-      new Response("Internal Server Error", { status: 500 }),
-    );
+    // /jetton/transfers — persistent 5xx. AGE-960's bounded retry treats a
+    // 5xx as transient and retries the SAME endpoint before giving up, so
+    // this must keep answering 500 across every attempt, not just once.
+    mockFetch.mockResolvedValue(new Response("Internal Server Error", { status: 500 }));
 
-    const { verifyTonTransfer } = await import("../src/verify.js");
+    const { verifyTonTransfer, TransientVerificationError } = await import("../src/verify.js");
     const config = makeConfig();
-    await expect(verifyTonTransfer("tonhash", config)).rejects.toThrow("TON Jetton API error");
+    // Still a loud failure (never silently returns null) — now surfaced as a
+    // TransientVerificationError after bounded retry, not an immediate throw.
+    let caught: unknown;
+    try {
+      await verifyTonTransfer("tonhash", config);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(TransientVerificationError);
+    expect((caught as Error).message).toMatch(/500/);
   });
 });
 
@@ -359,6 +368,67 @@ describe("verifyTransfer dispatcher", () => {
   });
 });
 
+// ── withRpcFailover (AGE-960 / GH#49: single-RPC SPOF, no failover/retry) ────
+
+describe("withRpcFailover", () => {
+  it("retries the same endpoint on a transient error, then succeeds", async () => {
+    const { withRpcFailover } = await import("../src/verify.js");
+    let calls = 0;
+    const result = await withRpcFailover(["https://a"], async (url) => {
+      calls++;
+      if (calls < 2) throw new Error("ETIMEDOUT");
+      return `ok:${url}`;
+    });
+    expect(result).toBe("ok:https://a");
+    expect(calls).toBe(2);
+  });
+
+  it("fails over to the next endpoint once the first is exhausted", async () => {
+    const { withRpcFailover } = await import("../src/verify.js");
+    const attempted: string[] = [];
+    const result = await withRpcFailover(["https://a", "https://b"], async (url) => {
+      attempted.push(url);
+      if (url === "https://a") throw new Error("fetch failed: connect ETIMEDOUT");
+      return `ok:${url}`;
+    });
+    expect(result).toBe("ok:https://b");
+    // 3 attempts against "a" (all transient) before failing over to "b".
+    expect(attempted.filter((u) => u === "https://a").length).toBe(3);
+    expect(attempted.filter((u) => u === "https://b").length).toBe(1);
+  });
+
+  it("rethrows a non-transient error immediately — no retry, no failover", async () => {
+    const { withRpcFailover } = await import("../src/verify.js");
+    let calls = 0;
+    await expect(
+      withRpcFailover(["https://a", "https://b"], async () => {
+        calls++;
+        throw new Error("No wallet configured for chain eth");
+      }),
+    ).rejects.toThrow("No wallet configured");
+    expect(calls).toBe(1);
+  });
+
+  it("throws TransientVerificationError (never a bare Error) once every endpoint is exhausted", async () => {
+    const { withRpcFailover, TransientVerificationError } = await import("../src/verify.js");
+    await expect(
+      withRpcFailover(["https://a", "https://b"], async () => {
+        throw new Error("network timeout");
+      }),
+    ).rejects.toBeInstanceOf(TransientVerificationError);
+  });
+
+  it("fetchWithRetry retries a transient 5xx on the same URL before succeeding", async () => {
+    const { fetchWithRetry } = await import("../src/verify.js");
+    const mockFetch = vi.mocked(fetch);
+    mockFetch.mockResolvedValueOnce(new Response("boom", { status: 503 }));
+    mockFetch.mockResolvedValueOnce(new Response("ok", { status: 200 }));
+    const resp = await fetchWithRetry("https://ton.example/api");
+    expect(resp.status).toBe(200);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+});
+
 // ── Helper: build a Config object for testing ──
 
 function makeConfig(wallets?: Partial<Record<string, string>>) {
@@ -374,11 +444,13 @@ function makeConfig(wallets?: Partial<Record<string, string>>) {
       base_sepolia: wallets?.base_sepolia ?? wallets?.base ?? "0xTestBaseWallet",
     },
     rpc: {
-      base: "https://mainnet.base.org",
-      eth: "https://cloudflare-eth.com",
+      base: ["https://mainnet.base.org"],
+      eth: ["https://cloudflare-eth.com"],
+      arbitrum: ["https://arb1.arbitrum.io/rpc"],
       sol: "https://api.mainnet-beta.solana.com",
       ton: "https://toncenter.com/api/v3",
-      base_sepolia: "https://sepolia.base.org",
+      base_sepolia: ["https://sepolia.base.org"],
+      eth_sepolia: ["https://ethereum-sepolia-rpc.publicnode.com"],
     },
     prices: { starter: 10, pro: 25, max: 100 },
     telegramBotToken: "",

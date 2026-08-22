@@ -96,6 +96,25 @@ Set via Supabase dashboard or CLI:
 - `SUPABASE_ANON_KEY` — Auto-set by Supabase
 - `CRYPTO_CALLBACK_SECRET` — HMAC secret for webhook signatures
 - `CRYPTO_PAYMENTS_API_KEY` — API key for authenticated requests
+- `RPC_ETH` / `RPC_BASE` / `RPC_ARBITRUM` / `RPC_ETH_SEPOLIA` / `RPC_BASE_SEPOLIA`
+  — **(AGE-960 / GH#49)** comma-separated ordered RPC endpoint list per
+  chain, e.g. `RPC_ETH="https://your-paid-provider,https://cloudflare-eth.com"`.
+  Put a paid provider (Alchemy/Infura/Ankr) first for production. If unset,
+  falls back to `src/config.ts`'s built-in list of 2-3 free public endpoints
+  per chain — **as of this writing, this project is not confirmed to set
+  these**, so production likely relies on the free-public defaults. Verify
+  with `supabase secrets list --project-ref krjbwbvmrpazdmmjstzo` (requires
+  project access this repo's assignee did not have at audit time).
+
+### Reconciliation sweep
+
+`POST /api/admin/reconcile` (requires `x-api-key`) re-attempts on-chain
+verification for every non-terminal payment older than `olderThanMinutes`
+(default 2, query param) that has a `tx_hash`. Added for AGE-960 / GH#49: an
+RPC timeout used to leave (or worse, terminally fail) a payment with no
+unattended retry path if the client never polled `GET /api/payment/:id`
+again. Idempotent — safe to invoke repeatedly or on a schedule (see
+`.github/workflows/reconcile-cron.yml`).
 
 ## OpenClawBot Integration
 

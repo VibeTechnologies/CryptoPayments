@@ -1,0 +1,39 @@
+name: Reconcile pending crypto payments (AGE-960 / GH#49)
+
+# A payment can be left in the non-terminal "pending" state indefinitely if
+# the client never polls GET /api/payment/:id again after a transient RPC
+# failure (closed tab, crashed bot process, etc.). This unattended sweep
+# calls POST /api/admin/reconcile on a schedule so those payments still
+# settle without depending on the client to come back. Idempotent by design
+# (see finalizeVerifiedPayment's guard in src/server.ts) — safe to run
+# concurrently with itself or with a client's own lazy re-verify.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call reconcile endpoint
+        env:
+          CRYPTO_PAYMENTS_URL: ${{ secrets.CRYPTO_PAYMENTS_URL }}
+          CRYPTO_PAYMENTS_API_KEY: ${{ secrets.CRYPTO_PAYMENTS_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CRYPTO_PAYMENTS_URL:-}" ] || [ -z "${CRYPTO_PAYMENTS_API_KEY:-}" ]; then
+            echo "::warning::CRYPTO_PAYMENTS_URL / CRYPTO_PAYMENTS_API_KEY secrets not set on this repo — skipping. Configure them to enable the unattended reconciliation sweep." >&2
+            exit 0
+          fi
+          resp=$(curl -sS -w '\n%{http_code}' -X POST \
+            "${CRYPTO_PAYMENTS_URL%/}/api/admin/reconcile?olderThanMinutes=2" \
+            -H "x-api-key: ${CRYPTO_PAYMENTS_API_KEY}")
+          body=$(echo "$resp" | head -n -1)
+          code=$(echo "$resp" | tail -n1)
+          echo "$body"
+          if [ "$code" -ge 300 ]; then
+            echo "::error::reconcile endpoint returned HTTP $code" >&2
+            exit 1
+          fi

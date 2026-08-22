@@ -486,7 +486,7 @@ describe("Server API", () => {
       expect(body.payment.status).toBe("failed");
     });
 
-    it("handles verification error gracefully", async () => {
+    it("AGE-960/GH#49 regression: RPC timeout on POST verify is NON-TERMINAL, not failed", async () => {
       mockedVerifyTransfer.mockRejectedValueOnce(new Error("RPC timeout"));
 
       const res = await app.request("/api/payment", {
@@ -502,10 +502,19 @@ describe("Server API", () => {
         }),
       });
 
-      expect(res.status).toBe(500);
+      // A thrown RPC/network error means verification did NOT complete — it is
+      // never a confirmed negative result, so this must not be reported (or
+      // stored) as a terminal failure. 503 signals "retry", not "rejected".
+      expect(res.status).toBe(503);
       const body = await res.json();
       expect(body.error).toContain("RPC timeout");
-      expect(body.payment.status).toBe("failed");
+      expect(body.pending).toBe(true);
+      expect(body.payment.status).not.toBe("failed");
+      expect(body.payment.status).toBe("pending");
+      // amount_usd must still read as the pre-verification placeholder (0),
+      // never a value that looks like a completed read of "customer paid
+      // nothing" — it is unset/unchanged by this catch path.
+      expect(body.payment.amount_usd).toBe(0);
     });
 
     it("accepts base_sepolia as valid chainId", async () => {
@@ -1637,6 +1646,114 @@ describe("Server API", () => {
       // Non-UUID, non-pi_, non-numeric ids still rejected
       const bad = await app.request("/api/payment/not-a-valid-id");
       expect(bad.status).toBe(400);
+    });
+
+    it("AGE-960/GH#49 regression: RPC timeout during GET lazy re-verify stays non-terminal", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce("pending");
+      const postRes = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xget_timeout_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "81",
+          plan: "starter",
+          apiKey: "test-api-key",
+        }),
+      });
+      expect(postRes.status).toBe(202);
+      const paymentId = (await postRes.json()).payment.id;
+
+      mockedVerifyTransfer.mockRejectedValueOnce(new Error("RPC timeout"));
+      const getRes = await app.request(`/api/payment/${paymentId}`);
+      expect(getRes.status).toBe(200);
+      const body = await getRes.json();
+      expect(body.payment.status).not.toBe("failed");
+      expect(body.payment.status).toBe("pending");
+    });
+  });
+
+  // ── Reconciliation sweep (AGE-960 / GH#49 acceptance criterion #3) ─────────
+
+  describe("POST /api/admin/reconcile", () => {
+    const originalFetch = globalThis.fetch;
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it("rejects without a valid API key", async () => {
+      const res = await app.request("/api/admin/reconcile", { method: "POST" });
+      expect(res.status).toBe(401);
+    });
+
+    it("settles a stale pending payment exactly once across two invocations (idempotency)", async () => {
+      globalThis.fetch = vi.fn(async () => new Response("OK", { status: 200 })) as any;
+
+      // Leave a payment stuck pending, as an RPC-timeout catch now does.
+      mockedVerifyTransfer.mockRejectedValueOnce(new Error("RPC timeout"));
+      const postRes = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xreconcile_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "90",
+          plan: "starter",
+          apiKey: "test-api-key",
+          callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
+        }),
+      });
+      expect(postRes.status).toBe(503);
+      expect((await postRes.json()).payment.status).toBe("pending");
+
+      // Back-date created_at so the 0-minute cutoff below always picks it up
+      // regardless of how fast the test runs.
+      await (mockDb as any)
+        .from("payment_intents")
+        .update({ created_at: new Date(Date.now() - 10 * 60_000).toISOString() })
+        .eq("tx_hash", "0xreconcile_tx");
+
+      // First reconcile pass: RPC now succeeds → settles to verified, fires webhook once.
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 99999,
+        txHash: "0xreconcile_tx",
+      });
+      const firstSweep = await app.request("/api/admin/reconcile?olderThanMinutes=0", {
+        method: "POST",
+        headers: { "x-api-key": "test-api-key" },
+      });
+      expect(firstSweep.status).toBe(200);
+      const firstBody = await firstSweep.json();
+      expect(firstBody.verified).toBe(1);
+
+      // Second reconcile pass (double-invoke, per acceptance criterion #3):
+      // the payment is no longer in the pending pool at all, and even if it
+      // were re-scanned, finalizeVerifiedPayment's guard makes it a no-op.
+      const secondSweep = await app.request("/api/admin/reconcile?olderThanMinutes=0", {
+        method: "POST",
+        headers: { "x-api-key": "test-api-key" },
+      });
+      const secondBody = await secondSweep.json();
+      expect(secondBody.verified).toBe(0);
+      expect(secondBody.checked).toBe(0);
+
+      // Webhook must have fired exactly once, not twice.
+      const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+      await new Promise((r) => setTimeout(r, 150));
+      const webhookCalls = fetchMock.mock.calls.filter(
+        (args: any[]) => String(args[0]) === "https://admin.openclaw.vibebrowser.app/webhook",
+      );
+      expect(webhookCalls.length).toBe(1);
     });
   });
 });

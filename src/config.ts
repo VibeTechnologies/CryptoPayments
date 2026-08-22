@@ -14,13 +14,20 @@ export interface Config {
     eth_sepolia: string;
   };
   rpc: {
-    base: string;
-    eth: string;
-    arbitrum: string;
+    /** Ordered list of RPC endpoints. Index 0 is tried first; later entries are
+     * failover targets tried after bounded retry on the earlier ones is
+     * exhausted (AGE-960 / GH#49 — no chain here may have exactly one
+     * endpoint with no fallback). */
+    base: string[];
+    eth: string[];
+    arbitrum: string[];
+    base_sepolia: string[];
+    eth_sepolia: string[];
+    /** TON/SOL verification is fetch-based (no viem client), so these stay
+     * single-endpoint for now — see verify.ts's fetchWithRetry for the bounded
+     * retry applied instead of multi-endpoint failover. */
     sol: string;
     ton: string;
-    base_sepolia: string;
-    eth_sepolia: string;
   };
   prices: {
     starter: number;
@@ -49,6 +56,21 @@ const env = (key: string, fallback = ""): string => {
   return g.process?.env?.[key] ?? fallback;
 };
 
+/**
+ * Read an RPC endpoint list. `RPC_ETH="https://a,https://b"` overrides the
+ * built-in ordered list entirely; an unset env var falls back to `defaults`
+ * (which already has 2+ free public endpoints per chain — AGE-960 / GH#49:
+ * a single public RPC with no failover turned a mined, confirmed transfer
+ * into a permanently-`failed` payment the moment that one endpoint timed
+ * out).
+ */
+const envList = (key: string, defaults: string[]): string[] => {
+  const raw = env(key);
+  if (!raw) return defaults;
+  const parsed = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  return parsed.length > 0 ? parsed : defaults;
+};
+
 export function loadConfig(): Config {
   // Security startup warnings — logged once at boot so ops notices misconfiguration.
   if (!env("API_KEY")) {
@@ -72,13 +94,38 @@ export function loadConfig(): Config {
       eth_sepolia: env("WALLET_ETH_SEPOLIA", env("WALLET_ETH")),
     },
     rpc: {
-      base: env("RPC_BASE", "https://mainnet.base.org"),
-      eth: env("RPC_ETH", "https://cloudflare-eth.com"),
-      arbitrum: env("RPC_ARBITRUM", "https://arb1.arbitrum.io/rpc"),
+      // Each list's [0] is today's documented default (unchanged, so an
+      // operator relying on the old single-URL behavior sees no change) with
+      // 1-2 free public endpoints appended as failover targets (AGE-960 /
+      // GH#49). Override any chain in production with a comma-separated
+      // list — put a paid provider first:
+      // `RPC_ETH="https://your-paid-url,https://cloudflare-eth.com"`.
+      base: envList("RPC_BASE", [
+        "https://mainnet.base.org",
+        "https://base.llamarpc.com",
+        "https://base-rpc.publicnode.com",
+      ]),
+      eth: envList("RPC_ETH", [
+        "https://cloudflare-eth.com",
+        "https://eth.llamarpc.com",
+        "https://ethereum-rpc.publicnode.com",
+      ]),
+      arbitrum: envList("RPC_ARBITRUM", [
+        "https://arb1.arbitrum.io/rpc",
+        "https://arbitrum.llamarpc.com",
+        "https://arbitrum-one-rpc.publicnode.com",
+      ]),
       sol: env("RPC_SOL", "https://api.mainnet-beta.solana.com"),
       ton: env("RPC_TON", "https://toncenter.com/api/v3"),
-      base_sepolia: env("RPC_BASE_SEPOLIA", "https://sepolia.base.org"),
-      eth_sepolia: env("RPC_ETH_SEPOLIA", "https://ethereum-sepolia-rpc.publicnode.com"),
+      base_sepolia: envList("RPC_BASE_SEPOLIA", [
+        "https://sepolia.base.org",
+        "https://base-sepolia-rpc.publicnode.com",
+      ]),
+      eth_sepolia: envList("RPC_ETH_SEPOLIA", [
+        "https://ethereum-sepolia-rpc.publicnode.com",
+        "https://ethereum-sepolia.blockpi.network/v1/rpc/public",
+        "https://rpc.sepolia.org",
+      ]),
     },
     prices: {
       starter: Number(env("PRICE_STARTER")) || 10,

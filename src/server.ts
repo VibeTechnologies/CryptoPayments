@@ -37,7 +37,7 @@ import {
   recordCallbackOutcome,
   type PaymentRecord,
 } from "./db.ts";
-import { verifyTransfer, resolveplan } from "./verify.ts";
+import { verifyTransfer, resolveplan, TransientVerificationError } from "./verify.ts";
 import { verifyTelegramInitData } from "./telegram.ts";
 
 const config = loadConfig();
@@ -170,6 +170,16 @@ export function createApp(injectedDb?: DB) {
     result: { from: string; to: string; amountRaw: string; amountUsd: number; blockNumber?: number },
     ctx: VerificationContext,
   ): Promise<{ ok: true; payment: PaymentRecord | null } | { ok: false; error: string }> {
+    // Idempotency guard (AGE-960 / GH#49 acceptance criterion #3): the
+    // reconciler sweep and the request-time verify path can race on the same
+    // payment (e.g. reconciler picks it up moments before a client's GET
+    // lazy re-verify). Re-finalizing an already-verified payment must be a
+    // no-op -- never re-run plan validation, never re-fire the webhook.
+    const before = await getPaymentById(appDb, paymentId);
+    if (before?.status === "verified") {
+      return { ok: true, payment: before };
+    }
+
     // Top-up flow (#29): require the on-chain amount to cover the pack price.
     if (ctx.topup && ctx.topup in TOPUP_PRICES && result.amountUsd < TOPUP_PRICES[ctx.topup]) {
       await markPaymentFailed(appDb, paymentId);
@@ -417,11 +427,29 @@ export function createApp(injectedDb?: DB) {
 
       return c.json({ payment: outcome.payment });
     } catch (err) {
+      // AGE-960 / GH#49: verifyTransfer only RETURNS a negative result (null =
+      // hard mismatch/revert, handled above) or "pending" (not yet mined).
+      // Anything it THROWS — RPC timeout, network error, 5xx, rate-limit,
+      // even a config/programming bug — means verification did not complete,
+      // not that it completed with a negative result. That distinction is
+      // the whole defect: a mined, correctly-paid transfer was being recorded
+      // as `failed` (indistinguishable from a genuine non-payment) whenever
+      // the single public RPC endpoint timed out. Never call
+      // markPaymentFailed here — leave the payment row exactly as inserted
+      // (non-terminal; the reconciler and the GET lazy re-verify path will
+      // retry it) and tell the caller this is retryable.
       const msg = err instanceof Error ? err.message : String(err);
-      await markPaymentFailed(appDb, payment.id);
+      const transient = err instanceof TransientVerificationError;
+      console.error(
+        `[VERIFY-RETRY] payment ${payment.id} verification did not complete (${transient ? "RPC exhausted" : "error"}): ${msg}`,
+      );
       return c.json(
-        { error: `Verification failed: ${msg}`, payment: await getPaymentById(appDb, payment.id) },
-        500,
+        {
+          error: `Verification did not complete, will retry: ${msg}`,
+          payment: await getPaymentById(appDb, payment.id),
+          pending: true,
+        },
+        503,
       );
     }
   });
@@ -480,6 +508,93 @@ export function createApp(injectedDb?: DB) {
     }
 
     return c.json({ payment });
+  });
+
+  // ── Reconciliation sweep (AGE-960 / GH#49 acceptance criterion #3) ─────────
+  //
+  // A payment can be left in the non-terminal `requires_payment_method`
+  // ("pending") state indefinitely if the client never polls GET
+  // /api/payment/:id again after a transient RPC failure (closed browser tab,
+  // crashed bot process, etc.). This endpoint re-attempts verification for
+  // every such payment older than `olderThanMinutes` (default 2) so an
+  // unattended sweep (cron / GitHub Actions schedule) can settle them without
+  // relying on the client to come back. Idempotent: `finalizeVerifiedPayment`
+  // no-ops on a payment that is already `verified`, so invoking this twice
+  // (or racing it against a client's own lazy re-verify) never double-fires
+  // the webhook or double-provisions.
+  app.post("/api/admin/reconcile", async (c) => {
+    if (!requireApiKey(c)) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+
+    const olderThanMinutes = Number(c.req.query("olderThanMinutes")) || 2;
+    const cutoff = Date.now() - olderThanMinutes * 60_000;
+    const limit = Number(c.req.query("limit")) || 200;
+
+    const summary = {
+      checked: 0,
+      verified: 0,
+      stillPending: 0,
+      failed: 0,
+      skipped: 0,
+      errors: [] as string[],
+    };
+
+    const candidates = await listPaymentIntents(appDb, { limit });
+    const TERMINAL_STATUSES = new Set(["succeeded", "failed", "canceled"]);
+
+    for (const pi of candidates) {
+      if (TERMINAL_STATUSES.has(pi.status)) {
+        summary.skipped++;
+        continue;
+      }
+      if (!pi.tx_hash || !pi.chain_id) {
+        summary.skipped++;
+        continue;
+      }
+      if (new Date(pi.created_at).getTime() > cutoff) {
+        summary.skipped++;
+        continue;
+      }
+
+      summary.checked++;
+      try {
+        const result = await verifyTransfer(pi.tx_hash, pi.chain_id as ChainId, config);
+
+        if (result === "pending") {
+          summary.stillPending++;
+          continue;
+        }
+
+        if (!result) {
+          await markPaymentFailed(appDb, pi.stripe_id);
+          summary.failed++;
+          continue;
+        }
+
+        const meta = (pi.metadata ?? {}) as Record<string, unknown>;
+        const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+        const outcome = await finalizeVerifiedPayment(pi.stripe_id, result, {
+          callbackUrl: str(meta.callbackUrl),
+          plan: str(meta.plan) ?? pi.plan_id ?? undefined,
+          topup: str(meta.topup) ?? pi.topup_id ?? undefined,
+          tenantType: str(meta.tenantType),
+          vmProvider: str(meta.vmProvider),
+          hostType: str(meta.hostType),
+          deploymentType: str(meta.deploymentType),
+          amountUsd: str(meta.amountUsd),
+          checkoutIntentVerified: meta.checkoutIntentVerified === true,
+        });
+        if (outcome.ok) summary.verified++;
+        else summary.failed++;
+      } catch (err) {
+        // Still transient (RPC exhausted again) — leave pending for the next sweep.
+        summary.stillPending++;
+        summary.errors.push(`${pi.stripe_id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    return c.json(summary);
   });
 
   // ── User payment history (legacy) ──────────────────────────────────────────
