@@ -1755,5 +1755,101 @@ describe("Server API", () => {
       );
       expect(webhookCalls.length).toBe(1);
     });
+
+    it("AGE-994 regression: a terminal `failed` payment with a CONFIRMED tx_hash is recovered to verified", async () => {
+      // Reproduces the exact shape of the two live rows AGE-986 found and
+      // AGE-988's integrity-check flags (pi_b20ad22cf80342b8bbccd833184a3994 /
+      // pi_16e3e4b10d914acd8abb11bd263da831): status=failed, tx_hash present,
+      // and the chain actually has a confirmed transfer for it. Before this
+      // fix, reconcile's TERMINAL_STATUSES skip meant NOTHING would ever
+      // re-examine this row — it required a manual DB reset to settle.
+      globalThis.fetch = vi.fn(async () => new Response("OK", { status: 200 })) as any;
+
+      mockedVerifyTransfer.mockResolvedValueOnce("pending");
+      const postRes = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xshould_have_settled_reconcile_tx",
+          chainId: "eth_sepolia",
+          token: "usdc",
+          idType: "tg",
+          uid: "93",
+          plan: "starter",
+          apiKey: "test-api-key",
+          callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
+        }),
+      });
+      const paymentId = (await postRes.json()).payment.id;
+      await (mockDb as any)
+        .from("payment_intents")
+        .update({ status: "failed", amount: 0 })
+        .eq("tx_hash", "0xshould_have_settled_reconcile_tx");
+
+      // reconcile's chain re-check now reports a CONFIRMED transfer for a row
+      // we have on file as terminal `failed`.
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 55555,
+        txHash: "0xshould_have_settled_reconcile_tx",
+      });
+
+      const sweep = await app.request("/api/admin/reconcile?olderThanMinutes=0", {
+        method: "POST",
+        headers: { "x-api-key": "test-api-key" },
+      });
+      expect(sweep.status).toBe(200);
+      const body = await sweep.json();
+      expect(body.recoveredFailed.recovered).toBe(1);
+      expect(body.recoveredFailed.stillFailed).toBe(0);
+
+      const getRes = await app.request(`/api/payment/${paymentId}`);
+      const getBody = await getRes.json();
+      expect(getBody.payment.status).toBe("verified");
+
+      // Webhook fires now that it settled.
+      const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+      await new Promise((r) => setTimeout(r, 150));
+      const webhookCalls2 = fetchMock.mock.calls.filter(
+        (args: any[]) => String(args[0]) === "https://admin.openclaw.vibebrowser.app/webhook",
+      );
+      expect(webhookCalls2.length).toBe(1);
+    });
+
+    it("AGE-994: a terminal `failed` payment with no confirmed transfer stays failed, untouched", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce("pending");
+      const postRes = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xgenuinely_unpaid_tx",
+          chainId: "eth_sepolia",
+          token: "usdc",
+          idType: "tg",
+          uid: "94",
+          plan: "starter",
+          apiKey: "test-api-key",
+        }),
+      });
+      await (mockDb as any)
+        .from("payment_intents")
+        .update({ status: "failed", amount: 0 })
+        .eq("tx_hash", "0xgenuinely_unpaid_tx");
+
+      // No matching transfer on-chain — invariant holds, row must stay failed.
+      mockedVerifyTransfer.mockResolvedValueOnce(null);
+
+      const sweep = await app.request("/api/admin/reconcile?olderThanMinutes=0", {
+        method: "POST",
+        headers: { "x-api-key": "test-api-key" },
+      });
+      const body = await sweep.json();
+      expect(body.recoveredFailed.recovered).toBe(0);
+      expect(body.recoveredFailed.stillFailed).toBe(1);
+    });
   });
 });

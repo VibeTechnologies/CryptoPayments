@@ -532,6 +532,22 @@ export function createApp(injectedDb?: DB) {
   // no-ops on a payment that is already `verified`, so invoking this twice
   // (or racing it against a client's own lazy re-verify) never double-fires
   // the webhook or double-provisions.
+  //
+  // AGE-994: the sweep above structurally could not see a `failed` row --
+  // it is excluded by TERMINAL_STATUSES before the tx_hash/cutoff checks even
+  // run. That is the same two-outcomes-not-three modelling error that caused
+  // AGE-957/960 on the verifier side (a transient RPC failure treated as a
+  // hard negative), just applied to the recovery path: a payment marked
+  // `failed` in error (or whose transfer only confirmed after the mark) had
+  // NO mechanism that would ever look at it again -- confirmed live by
+  // AGE-986 (pi_b20ad22cf80342b8bbccd833184a3994, pi_16e3e4b10d914acd8abb11bd263da831
+  // sat unrecovered for 40+/55+ days). The second pass below re-examines
+  // exactly those rows -- `status = 'failed' AND tx_hash IS NOT NULL` -- and,
+  // only on a CONFIRMED chain result, transitions them out of the terminal
+  // state via the same idempotent finalizeVerifiedPayment guard used above
+  // and by the lazy re-verify path. A `null` (no matching transfer / revert)
+  // or `pending` result leaves the row exactly as it was: still failed, never
+  // re-marked, never double-processed.
   app.post("/api/admin/reconcile", async (c) => {
     if (!requireApiKey(c)) {
       return c.json({ error: "Unauthorized" }, 401);
@@ -540,6 +556,7 @@ export function createApp(injectedDb?: DB) {
     const olderThanMinutes = Number(c.req.query("olderThanMinutes")) || 2;
     const cutoff = Date.now() - olderThanMinutes * 60_000;
     const limit = Number(c.req.query("limit")) || 200;
+    const recoverFailedLimit = Number(c.req.query("recoverFailedLimit")) || 200;
 
     const summary = {
       checked: 0,
@@ -548,6 +565,12 @@ export function createApp(injectedDb?: DB) {
       failed: 0,
       skipped: 0,
       errors: [] as string[],
+      recoveredFailed: {
+        checked: 0,
+        recovered: 0,
+        stillFailed: 0,
+        errors: [] as string[],
+      },
     };
 
     const candidates = await listPaymentIntents(appDb, { limit });
@@ -603,6 +626,69 @@ export function createApp(injectedDb?: DB) {
         // Still transient (RPC exhausted again) — leave pending for the next sweep.
         summary.stillPending++;
         summary.errors.push(`${pi.stripe_id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    // ── AGE-994: re-examine terminal `failed` rows with a well-formed tx_hash ──
+    // Separate pool from the loop above (that one explicitly skips anything in
+    // TERMINAL_STATUSES). Bounded by `recoverFailedLimit` so an unattended
+    // 10-minute cron does not re-verify an ever-growing failed backlog forever.
+    const failedCandidates = await listPaymentIntents(appDb, { status: "failed", limit: recoverFailedLimit });
+
+    for (const pi of failedCandidates) {
+      if (!pi.tx_hash || !pi.chain_id) {
+        continue;
+      }
+
+      summary.recoveredFailed.checked++;
+      try {
+        const result = await verifyTransfer(pi.tx_hash, pi.chain_id as ChainId, config, {
+          totalBudgetMs: RPC_SWEEP_BUDGET_CRON_MS,
+        });
+
+        if (!result || result === "pending") {
+          // No confirmed transfer (or inconclusive/not-yet-mined) — the
+          // invariant holds, the row stays failed exactly as it was.
+          summary.recoveredFailed.stillFailed++;
+          continue;
+        }
+
+        // CONFIRMED on-chain transfer against a row we recorded as failed:
+        // recover it through the same idempotent finalize path used
+        // everywhere else. finalizeVerifiedPayment no-ops on an
+        // already-`verified` row, so a race with another sweep or a
+        // client's own lazy re-verify can never double-fire the webhook.
+        const meta = (pi.metadata ?? {}) as Record<string, unknown>;
+        const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+        const outcome = await finalizeVerifiedPayment(pi.stripe_id, result, {
+          callbackUrl: str(meta.callbackUrl),
+          plan: str(meta.plan) ?? pi.plan_id ?? undefined,
+          topup: str(meta.topup) ?? pi.topup_id ?? undefined,
+          tenantType: str(meta.tenantType),
+          vmProvider: str(meta.vmProvider),
+          hostType: str(meta.hostType),
+          deploymentType: str(meta.deploymentType),
+          amountUsd: str(meta.amountUsd),
+          checkoutIntentVerified: meta.checkoutIntentVerified === true,
+        });
+        if (outcome.ok) {
+          summary.recoveredFailed.recovered++;
+          console.error(
+            `[PAYMENT-RECOVERED] payment ${pi.stripe_id} was terminal 'failed' but has a ` +
+              `CONFIRMED on-chain transfer for tx ${pi.tx_hash} — recovered to verified via reconcile sweep.`,
+          );
+        } else {
+          // finalizeVerifiedPayment rejected it on its own terms (amount/plan
+          // mismatch) — stays failed, but distinctly reported so it is not
+          // silently swallowed as "no confirmed transfer".
+          summary.recoveredFailed.stillFailed++;
+          summary.recoveredFailed.errors.push(`${pi.stripe_id}: ${outcome.error}`);
+        }
+      } catch (err) {
+        // RPC exhausted / transient — inconclusive, not a confirmed negative.
+        // Leave failed as-is; next sweep re-examines it.
+        summary.recoveredFailed.stillFailed++;
+        summary.recoveredFailed.errors.push(`${pi.stripe_id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
