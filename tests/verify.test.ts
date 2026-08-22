@@ -45,6 +45,28 @@ describe("verifyEvmTransfer", () => {
     expect(result).toBeNull();
   });
 
+  it("retries (does not immediately treat as no-match) a null receipt from a lagging RPC node, then succeeds", async () => {
+    // AGE-970: some RPC providers resolve getTransactionReceipt with `null`
+    // (rather than throwing) when their own node is behind chain tip. That
+    // must be treated as transient/retryable, not a definitive answer.
+    mockGetTransactionReceipt
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        status: "success",
+        blockNumber: 12345n,
+        logs: [],
+      });
+
+    const { verifyEvmTransfer } = await import("../src/verify.js");
+    const config = makeConfig();
+    const result = await verifyEvmTransfer("0xabc", "base", config);
+    // No matching Transfer log in the (eventually real) receipt => null, but
+    // critically we got there via retry, not an immediate short-circuit.
+    expect(result).toBeNull();
+    expect(mockGetTransactionReceipt).toHaveBeenCalledTimes(3);
+  });
+
   it("returns null when no matching Transfer log", async () => {
     mockGetTransactionReceipt.mockResolvedValue({
       status: "success",
@@ -426,6 +448,92 @@ describe("withRpcFailover", () => {
     const resp = await fetchWithRetry("https://ton.example/api");
     expect(resp.status).toBe(200);
     expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ── Sweep layer (AGE-970: re-sweep the whole endpoint list with backoff
+//    instead of giving up after a single failed pass) ──
+
+describe("withRpcFailover sweep layer (opts.totalBudgetMs)", () => {
+  it("survives N consecutive full-pass transient failures then succeeds on a later sweep", async () => {
+    const { withRpcFailover } = await import("../src/verify.js");
+    let calls = 0;
+    // 2 endpoints x 3 attempts = 6 transient failures burns through the
+    // first full pass entirely; succeed only once we reach the second sweep.
+    const FAILURES_BEFORE_SUCCESS = 7;
+    const result = await withRpcFailover(
+      ["https://a", "https://b"],
+      async (url) => {
+        calls++;
+        if (calls <= FAILURES_BEFORE_SUCCESS) throw new Error("ETIMEDOUT");
+        return `ok:${url}:${calls}`;
+      },
+      { totalBudgetMs: 20_000, chainId: "base" },
+    );
+    expect(result).toBe(`ok:https://a:${FAILURES_BEFORE_SUCCESS + 1}`);
+    // Proves a full first pass (6 calls) was exhausted and a second sweep
+    // actually re-tried the list from the top (call #7 succeeding on "a"
+    // again, not just retried within one endpoint).
+    expect(calls).toBe(FAILURES_BEFORE_SUCCESS + 1);
+  }, 15_000);
+
+  it("logs an [RPC-SWEEP] line with an observed delay before re-sweeping", async () => {
+    const { withRpcFailover } = await import("../src/verify.js");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    let calls = 0;
+    await withRpcFailover(
+      ["https://a"],
+      async () => {
+        calls++;
+        if (calls <= 3) throw new Error("ETIMEDOUT"); // exhausts the one endpoint's pass
+        return "ok";
+      },
+      { totalBudgetMs: 15_000, chainId: "eth" },
+    );
+    const sweepLines = logSpy.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("[RPC-SWEEP]"));
+    expect(sweepLines.length).toBeGreaterThanOrEqual(1);
+    expect(sweepLines[0]).toMatch(/chain=eth sweep=1 delayMs=\d+/);
+    // Full-jitter delay must be a real, bounded, non-negative number — not a
+    // fixed constant — so we assert on the observed value's range instead of
+    // an exact figure.
+    const observedDelay = Number(sweepLines[0].match(/delayMs=(\d+)/)?.[1]);
+    expect(observedDelay).toBeGreaterThanOrEqual(0);
+    expect(observedDelay).toBeLessThanOrEqual(250);
+    logSpy.mockRestore();
+  }, 15_000);
+
+  it("without opts.totalBudgetMs, throws after ONE pass — no sweep budget burned", async () => {
+    const { withRpcFailover, TransientVerificationError } = await import("../src/verify.js");
+    let calls = 0;
+    const startedAt = Date.now();
+    await expect(
+      withRpcFailover(["https://a"], async () => {
+        calls++;
+        throw new Error("ETIMEDOUT");
+      }),
+    ).rejects.toBeInstanceOf(TransientVerificationError);
+    // 3 attempts against the single endpoint, no re-sweep — pre-AGE-970
+    // behavior preserved exactly for callers that don't opt in.
+    expect(calls).toBe(3);
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
+  it("a genuine non-transient error (tx not found) short-circuits immediately — never burns sweep budget", async () => {
+    const { withRpcFailover } = await import("../src/verify.js");
+    let calls = 0;
+    const startedAt = Date.now();
+    await expect(
+      withRpcFailover(
+        ["https://a", "https://b"],
+        async () => {
+          calls++;
+          throw new Error("Transaction receipt with hash ... could not be found");
+        },
+        { totalBudgetMs: 90_000, chainId: "base" }, // cron-sized budget — must NOT be consumed
+      ),
+    ).rejects.toThrow(/could not be found/);
+    expect(calls).toBe(1); // no retry, no failover, no sweep
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 });
 

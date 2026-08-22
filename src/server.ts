@@ -37,7 +37,13 @@ import {
   recordCallbackOutcome,
   type PaymentRecord,
 } from "./db.ts";
-import { verifyTransfer, resolveplan, TransientVerificationError } from "./verify.ts";
+import {
+  verifyTransfer,
+  resolveplan,
+  TransientVerificationError,
+  RPC_SWEEP_BUDGET_WEBHOOK_MS,
+  RPC_SWEEP_BUDGET_CRON_MS,
+} from "./verify.ts";
 import { verifyTelegramInitData } from "./telegram.ts";
 
 const config = loadConfig();
@@ -394,7 +400,9 @@ export function createApp(injectedDb?: DB) {
 
     // ── Verify on-chain ──
     try {
-      const result = await verifyTransfer(body.txHash, body.chainId, config);
+      const result = await verifyTransfer(body.txHash, body.chainId, config, {
+        totalBudgetMs: RPC_SWEEP_BUDGET_WEBHOOK_MS,
+      });
 
       if (result === "pending") {
         // TX not yet mined or not enough confirmations — leave payment as pending, caller retries
@@ -484,7 +492,9 @@ export function createApp(injectedDb?: DB) {
     // using the server-persisted metadata (never client-supplied at poll time).
     if (payment.status === "pending" && payment.tx_hash && payment.chain_id) {
       try {
-        const result = await verifyTransfer(payment.tx_hash, payment.chain_id as ChainId, config);
+        const result = await verifyTransfer(payment.tx_hash, payment.chain_id as ChainId, config, {
+          totalBudgetMs: RPC_SWEEP_BUDGET_WEBHOOK_MS,
+        });
         if (result && result !== "pending") {
           const meta = (payment.metadata ?? {}) as Record<string, unknown>;
           const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
@@ -559,7 +569,9 @@ export function createApp(injectedDb?: DB) {
 
       summary.checked++;
       try {
-        const result = await verifyTransfer(pi.tx_hash, pi.chain_id as ChainId, config);
+        const result = await verifyTransfer(pi.tx_hash, pi.chain_id as ChainId, config, {
+          totalBudgetMs: RPC_SWEEP_BUDGET_CRON_MS,
+        });
 
         if (result === "pending") {
           summary.stillPending++;

@@ -51,9 +51,41 @@ const RETRY_ATTEMPTS_PER_ENDPOINT = 3;
 const RETRY_BASE_DELAY_MS = 300;
 const RETRY_MAX_TOTAL_MS = 10_000;
 
+/**
+ * Delay schedule for the OUTER sweep layer (AGE-970): once a full pass over
+ * every configured endpoint has failed transiently, wait and sweep the
+ * entire list again rather than giving up after one pass. Base delays are
+ * 250ms -> 500ms -> 1s -> 2s -> 4s (capped), each drawn with FULL jitter
+ * (`random(0, cap)`, AWS "full jitter" strategy) so concurrent callers
+ * (webhook + reconcile cron hitting the same flaky endpoint) don't retry in
+ * lockstep.
+ */
+const SWEEP_BASE_DELAY_MS = 250;
+const SWEEP_MAX_DELAY_MS = 4_000;
+
+/**
+ * Total wall-clock budget for the interactive webhook / lazy-poll paths
+ * (POST /api/payment, GET /api/payment/:id) — a human or bot is blocked on
+ * this HTTP request, so it stays comfortably under typical client/proxy
+ * timeouts while still buying roughly one extra full sweep beyond the
+ * original single-pass `RETRY_MAX_TOTAL_MS` ceiling.
+ */
+export const RPC_SWEEP_BUDGET_WEBHOOK_MS = 20_000;
+
+/**
+ * Total wall-clock budget for the unattended reconcile sweep
+ * (POST /api/admin/reconcile, invoked from a cron / GitHub Actions
+ * schedule). Nobody is blocked on this call synchronously, and a mined but
+ * not-yet-visible-everywhere transfer is far more likely to show up within
+ * a longer window, so this affords several sweeps per payment (~90s) before
+ * giving up and leaving the row for the next scheduled run — still bounded
+ * so one stubborn payment can't stall the whole batch indefinitely.
+ */
+export const RPC_SWEEP_BUDGET_CRON_MS = 90_000;
+
 function isTransientRpcError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|network|fetch failed|abort|socket hang up|HeadersTimeoutError|UND_ERR|\b5\d\d\b|rate.?limit|too many requests|429/i.test(
+  return /timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|network|fetch failed|abort|socket hang up|HeadersTimeoutError|UND_ERR|\b5\d\d\b|rate.?limit|too many requests|429|lagging/i.test(
     msg,
   );
 }
@@ -65,43 +97,73 @@ function sleep(ms: number): Promise<void> {
 /**
  * Run `fn(url)` against each RPC endpoint in `rpcUrls`, in order. Within one
  * endpoint, retry up to `RETRY_ATTEMPTS_PER_ENDPOINT` times with exponential
- * backoff (capped at `RETRY_MAX_TOTAL_MS` total across ALL endpoints/retries)
- * on a transient-looking error before failing over to the next endpoint.
+ * backoff on a transient-looking error before failing over to the next
+ * endpoint.
+ *
+ * If `opts.totalBudgetMs` is passed, a full failed pass over every endpoint
+ * does not give up immediately (AGE-970): it sleeps a jittered backoff
+ * (`SWEEP_BASE_DELAY_MS` doubling, capped at `SWEEP_MAX_DELAY_MS`, full
+ * jitter) and re-sweeps the whole endpoint list from the top, repeating
+ * until `totalBudgetMs` elapses. Omitting `opts.totalBudgetMs` preserves the
+ * original pre-AGE-970 behavior exactly: a single pass bounded by
+ * `RETRY_MAX_TOTAL_MS`, then an immediate throw — existing callers/tests
+ * that don't opt in are unaffected.
  *
  * A non-transient error (e.g. "tx not found", a hard revert signal, a
- * programming error) is rethrown immediately without retry or failover —
- * that is a real, complete answer, not an infrastructure hiccup.
+ * programming error) is rethrown immediately without retry, failover, or
+ * sweep — that is a real, complete answer, not an infrastructure hiccup.
  *
- * If every endpoint is exhausted, throws `TransientVerificationError`.
+ * If the budget is exhausted, throws `TransientVerificationError`.
  */
 export async function withRpcFailover<T>(
   rpcUrls: string[],
   fn: (url: string) => Promise<T>,
+  opts?: { totalBudgetMs?: number; chainId?: string },
 ): Promise<T> {
   if (rpcUrls.length === 0) {
     throw new Error("No RPC endpoints configured");
   }
+  const sweepEnabled = opts?.totalBudgetMs !== undefined;
+  const totalBudgetMs = opts?.totalBudgetMs ?? RETRY_MAX_TOTAL_MS;
+  const chainLabel = opts?.chainId ?? "unknown";
   const start = Date.now();
   let lastErr: unknown;
-  for (const url of rpcUrls) {
-    for (let attempt = 1; attempt <= RETRY_ATTEMPTS_PER_ENDPOINT; attempt++) {
-      try {
-        return await fn(url);
-      } catch (err) {
-        lastErr = err;
-        if (!isTransientRpcError(err)) throw err;
-        const elapsed = Date.now() - start;
-        if (elapsed >= RETRY_MAX_TOTAL_MS) break;
-        if (attempt < RETRY_ATTEMPTS_PER_ENDPOINT) {
-          const delay = Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_TOTAL_MS - elapsed);
-          await sleep(delay);
+  let sweep = 0;
+  for (;;) {
+    for (const url of rpcUrls) {
+      for (let attempt = 1; attempt <= RETRY_ATTEMPTS_PER_ENDPOINT; attempt++) {
+        try {
+          return await fn(url);
+        } catch (err) {
+          lastErr = err;
+          if (!isTransientRpcError(err)) throw err;
+          const elapsed = Date.now() - start;
+          if (elapsed >= totalBudgetMs) break;
+          if (attempt < RETRY_ATTEMPTS_PER_ENDPOINT) {
+            const delay = Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), totalBudgetMs - elapsed);
+            console.log(
+              `[RPC-RETRY] chain=${chainLabel} endpoint=${url} attempt=${attempt}/${RETRY_ATTEMPTS_PER_ENDPOINT} delayMs=${delay}`,
+            );
+            await sleep(delay);
+          }
         }
       }
     }
+    if (!sweepEnabled) break;
+    const elapsed = Date.now() - start;
+    if (elapsed >= totalBudgetMs) break;
+    sweep++;
+    const cap = Math.min(SWEEP_BASE_DELAY_MS * 2 ** (sweep - 1), SWEEP_MAX_DELAY_MS);
+    const delay = Math.random() * cap; // full jitter
+    if (elapsed + delay >= totalBudgetMs) break;
+    console.log(
+      `[RPC-SWEEP] chain=${chainLabel} sweep=${sweep} delayMs=${Math.round(delay)} elapsedMs=${elapsed} budgetMs=${totalBudgetMs}`,
+    );
+    await sleep(delay);
   }
   const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
   throw new TransientVerificationError(
-    `All ${rpcUrls.length} RPC endpoint(s) failed after retry: ${msg}`,
+    `All ${rpcUrls.length} RPC endpoint(s) failed after retry${sweep > 0 ? ` across ${sweep + 1} sweeps` : ""}: ${msg}`,
     lastErr,
   );
 }
@@ -113,14 +175,22 @@ export async function withRpcFailover<T>(
  * chain), but a timeout/network blip/5xx no longer surfaces as an immediate
  * throw into the terminal-failure catch in server.ts.
  */
-export async function fetchWithRetry(url: string, init?: RequestInit): Promise<Response> {
-  return withRpcFailover([url], async (u) => {
-    const resp = await fetch(u, { ...init, signal: init?.signal ?? AbortSignal.timeout(10_000) });
-    if (resp.status >= 500 || resp.status === 429) {
-      throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
-    }
-    return resp;
-  });
+export async function fetchWithRetry(
+  url: string,
+  init?: RequestInit,
+  opts?: { totalBudgetMs?: number; chainId?: string },
+): Promise<Response> {
+  return withRpcFailover(
+    [url],
+    async (u) => {
+      const resp = await fetch(u, { ...init, signal: init?.signal ?? AbortSignal.timeout(10_000) });
+      if (resp.status >= 500 || resp.status === 429) {
+        throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+      }
+      return resp;
+    },
+    opts,
+  );
 }
 
 export interface VerifiedTransfer {
@@ -144,6 +214,7 @@ export async function verifyEvmTransfer(
   txHash: string,
   chainId: "base" | "eth" | "arbitrum" | "base_sepolia" | "eth_sepolia",
   config: Config,
+  opts?: { totalBudgetMs?: number },
 ): Promise<VerifyResult> {
   const chain = chainId === "base_sepolia" ? baseSepolia
     : chainId === "eth_sepolia" ? sepolia
@@ -173,8 +244,22 @@ export async function verifyEvmTransfer(
   // retries/fails-over first, then re-raises as TransientVerificationError).
   let receipt: Awaited<ReturnType<ReturnType<typeof clientFor>["getTransactionReceipt"]>>;
   try {
-    receipt = await withRpcFailover(rpcUrls, (url) =>
-      clientFor(url).getTransactionReceipt({ hash: txHash as `0x${string}` }),
+    receipt = await withRpcFailover(
+      rpcUrls,
+      async (url) => {
+        const r = await clientFor(url).getTransactionReceipt({ hash: txHash as `0x${string}` });
+        // Some RPC providers resolve with a null receipt (instead of throwing
+        // "not found") when their own node is lagging behind chain tip, not
+        // because the tx genuinely hasn't been seen anywhere. Treating that as
+        // a definitive "no receipt" would misclassify a lagging node the same
+        // as a real not-yet-mined tx and skip retry/failover entirely
+        // (AGE-970). Force it through the same transient retry path instead.
+        if (!r) {
+          throw new Error("null transaction receipt (lagging RPC node)");
+        }
+        return r;
+      },
+      { totalBudgetMs: opts?.totalBudgetMs, chainId },
     );
   } catch (err) {
     if (err instanceof TransientVerificationError) throw err;
@@ -191,7 +276,11 @@ export async function verifyEvmTransfer(
 
   // Confirmation-count gate: protect against block reorganisations.
   // Testnets use 1 so a freshly mined tx passes immediately.
-  const currentBlock = await withRpcFailover(rpcUrls, (url) => clientFor(url).getBlockNumber());
+  const currentBlock = await withRpcFailover(
+    rpcUrls,
+    (url) => clientFor(url).getBlockNumber(),
+    { totalBudgetMs: opts?.totalBudgetMs, chainId },
+  );
   const confirmations = Number(currentBlock - receipt.blockNumber) + 1;
   if (confirmations < MIN_CONFIRMATIONS[chainId]) {
     return "pending"; // not yet confirmed — caller can retry
@@ -253,6 +342,7 @@ export async function verifyEvmTransfer(
 export async function verifyTonTransfer(
   txHash: string,
   config: Config,
+  opts?: { totalBudgetMs?: number },
 ): Promise<VerifiedTransfer | null> {
   // TON base64 addresses are case-sensitive — do NOT lowercase.
   const recipientWallet = config.wallets.ton.trim();
@@ -267,7 +357,7 @@ export async function verifyTonTransfer(
 
   const resp = await fetchWithRetry(url, {
     headers: { Accept: "application/json" },
-  });
+  }, { totalBudgetMs: opts?.totalBudgetMs, chainId: "ton" });
 
   if (!resp.ok) {
     throw new Error(`TON API error: ${resp.status} ${resp.statusText}`);
@@ -311,7 +401,7 @@ export async function verifyTonTransfer(
   const jettonUrl = `${apiBase}/jetton/transfers?transaction_hash=${encodeURIComponent(txHash)}&limit=10`;
   const jettonResp = await fetchWithRetry(jettonUrl, {
     headers: { Accept: "application/json" },
-  });
+  }, { totalBudgetMs: opts?.totalBudgetMs, chainId: "ton" });
 
   if (!jettonResp.ok) {
     // Throw loudly so callers know the result is indeterminate, not "not found".
@@ -374,6 +464,7 @@ export async function verifyTonTransfer(
 export async function verifySolTransfer(
   txHash: string,
   config: Config,
+  opts?: { totalBudgetMs?: number },
 ): Promise<VerifiedTransfer | null> {
   const recipientWallet = config.wallets.sol;
   if (!recipientWallet) {
@@ -397,7 +488,7 @@ export async function verifySolTransfer(
         },
       ],
     }),
-  });
+  }, { totalBudgetMs: opts?.totalBudgetMs, chainId: "sol" });
 
   if (!resp.ok) {
     throw new Error(`Solana RPC error: ${resp.status} ${resp.statusText}`);
@@ -566,6 +657,7 @@ export async function verifyTransfer(
   txHash: string,
   chainId: ChainId,
   config: Config,
+  opts?: { totalBudgetMs?: number },
 ): Promise<VerifyResult> {
   switch (chainId) {
     case "base":
@@ -573,11 +665,11 @@ export async function verifyTransfer(
     case "arbitrum":
     case "base_sepolia":
     case "eth_sepolia":
-      return verifyEvmTransfer(txHash, chainId, config);
+      return verifyEvmTransfer(txHash, chainId, config, opts);
     case "ton":
-      return verifyTonTransfer(txHash, config);
+      return verifyTonTransfer(txHash, config, opts);
     case "sol":
-      return verifySolTransfer(txHash, config);
+      return verifySolTransfer(txHash, config, opts);
     default:
       throw new Error(`Unsupported chain: ${chainId}`);
   }
