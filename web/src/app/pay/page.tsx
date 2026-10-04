@@ -8,6 +8,7 @@ import {
   findInvalidSignedIntentParams,
   isUnexpiredExp,
   rawIntentCanonicalString,
+  SEND_MIN_REMAINING_SEC,
   type IntentBody,
 } from "@/lib/intent";
 
@@ -15,6 +16,8 @@ const INVALID_SIGNED_LINK_MESSAGE =
   "This payment link is invalid or was modified. Request a new link.";
 const EXPIRED_SIGNED_LINK_MESSAGE =
   "This payment link has expired. Request a new link.";
+const EXPIRING_SIGNED_LINK_MESSAGE =
+  "This payment link expires too soon to complete a payment. Request a new link.";
 const SIGNED_UID_MISMATCH_MESSAGE =
   "This payment link was issued for a different Telegram account. Open it from the account that requested it.";
 
@@ -39,6 +42,10 @@ function signedLinkError(
     if (isUnexpiredExp(params.get("exp"), -1)) return EXPIRED_SIGNED_LINK_MESSAGE;
   }
   if (invalid.length > 0) return INVALID_SIGNED_LINK_MESSAGE;
+  // Refuse to START a send that could outlive the link: wallet approval +
+  // mining + POST must fit before exp (the server adds a post-exp grace only
+  // for transfers already in flight).
+  if (Number(params.get("exp")) - nowSec < SEND_MIN_REMAINING_SEC) return EXPIRING_SIGNED_LINK_MESSAGE;
   if (telegramUserId !== null && telegramUserId !== params.get("uid")) {
     return SIGNED_UID_MISMATCH_MESSAGE;
   }
@@ -335,20 +342,22 @@ export default function PayPage() {
           uid: fields.uid ?? "",
         });
       } else {
-        // Unsigned (legacy) link: the page's own idType wins and
-        // placement/runtime fields are NOT forwarded (only trusted under a
-        // signature).
+        // Unsigned (legacy) link: the page's own computed fields (idType, uid,
+        // plan, topup, callbackUrl) win over URL-derived ones, so the POSTed
+        // plan is exactly the plan displayed and charged (e.g. Telegram
+        // start_param `pro_42` overrides `?plan=starter`). Placement/runtime
+        // fields are NOT forwarded (only trusted under a signature).
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const { idType: _urlIdType, ...unsignedIntentFields } = intentBody;
         for (const field of SIGNED_ONLY_BODY_FIELDS) delete unsignedIntentFields[field];
         result = await submitPayment({
+          ...unsignedIntentFields,
           ...transport,
           idType,
           uid,
           plan: topup ? undefined : plan,
           topup: topup || undefined,
           callbackUrl: callbackUrl || undefined,
-          ...unsignedIntentFields,
         });
       }
 

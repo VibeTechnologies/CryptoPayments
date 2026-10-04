@@ -44,6 +44,28 @@ export const INTENT_PARAM_ALIASES: Readonly<Record<string, IntentParamKey>> = {
 export type IntentBody = Partial<Record<IntentBodyField | "sig", string>>;
 
 /**
+ * Unsigned query keys the pay page itself reads (UI only, never forwarded to
+ * /api/payment). On a signed link, any key that is not signed, not `sig` and
+ * not listed here makes the link invalid: unknown keys fail closed. Keep this
+ * minimal — only keys web/src/app/pay/page.tsx actually reads.
+ */
+export const UNSIGNED_UI_KEYS: readonly string[] = ["test"];
+
+/**
+ * The pay page refuses to START a wallet send unless the signed link has at
+ * least this many seconds left: wallet approval + mining + POST must fit.
+ */
+export const SEND_MIN_REMAINING_SEC = 300;
+
+/**
+ * Server-side grace: POST /api/payment accepts a signed intent up to this many
+ * seconds after `exp`, so a transfer started before expiry (wallet approval
+ * latency, slow mining) still settles. The HMAC still binds every field
+ * including `exp`; replay of one tx is blocked by the duplicate-txHash check.
+ */
+export const EXP_POST_GRACE_SEC = 900;
+
+/**
  * Map URL query params to the /api/payment body fields for the signed intent.
  * Values are forwarded byte-for-byte; absent keys are omitted. `sig` is
  * forwarded unchanged when present.
@@ -119,6 +141,10 @@ export function isUnexpiredExp(exp: string | null, nowSec: number): boolean {
  *     value (the body has a single tenantType field, so it cannot round-trip);
  *   - the legacy alias "vmProvider" (signer emits `vmp`; the alias cannot
  *     round-trip through the canonical string);
+ *   - "plan" when neither `plan` nor `topup` is present (the server cannot
+ *     settle a signed intent that names no product);
+ *   - every query key that is not signed, not `sig` and not in
+ *     UNSIGNED_UI_KEYS (unknown keys on a signed link fail closed);
  *   - "canonical" when none of the above fired but the raw URL canonical
  *     string still differs from the one rebuilt from the payment body. This
  *     closes the whole class of non-round-trippable shapes.
@@ -150,6 +176,10 @@ export function findInvalidSignedIntentParams(
   if (params.has("tenant") && params.get("tenant") !== params.get("tenantType")) add("tenant");
   for (const alias of aliasKeys) {
     if (params.has(alias)) add(alias);
+  }
+  if (!params.has("plan") && !params.has("topup")) add("plan");
+  for (const key of params.keys()) {
+    if (key !== "sig" && !signedKeys.includes(key) && !UNSIGNED_UI_KEYS.includes(key)) add(key);
   }
   if (
     invalid.length === 0 &&

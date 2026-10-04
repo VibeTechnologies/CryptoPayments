@@ -1106,6 +1106,64 @@ describe("Server API", () => {
         expect(body.payment.uid).toBe("42");
       });
 
+      // #58 r6: POST grace after exp (wallet-approval/mining latency). Replay
+      // of one tx is still blocked by the duplicate-txHash 409.
+      describe("exp grace (EXP_POST_GRACE_SEC)", () => {
+        const T0 = Date.UTC(2030, 0, 1);
+        const t0 = Math.floor(T0 / 1000);
+        const expAt = String(t0 + 60);
+        afterEach(() => {
+          vi.useRealTimers();
+        });
+        const signedAtT0 = () => {
+          vi.useFakeTimers({ toFake: ["Date"] });
+          vi.setSystemTime(T0);
+          return buildSignedCheckoutBody({ ...signedParams(), exp: expAt });
+        };
+
+        it("EXP_POST_GRACE_SEC is 900", async () => {
+          const { EXP_POST_GRACE_SEC } = await import("../src/intent.js");
+          expect(EXP_POST_GRACE_SEC).toBe(900);
+        });
+
+        it("accepts a signed POST at exp+600", async () => {
+          const checkout = signedAtT0();
+          vi.setSystemTime((Number(expAt) + 600) * 1000);
+          mockTransfer();
+          const res = await post(bodyFor(checkout));
+          expect(res.status).toBe(200);
+          expect((await res.json()).payment.status).toBe("verified");
+        });
+
+        it("rejects a signed POST at exp+901 (401, never verifies on-chain)", async () => {
+          const checkout = signedAtT0();
+          vi.setSystemTime((Number(expAt) + 901) * 1000);
+          const res = await post(bodyFor(checkout));
+          expect(res.status).toBe(401);
+          expect((await res.json()).error).toBe("Authentication required");
+          expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+        });
+
+        it("grace does not relax the HMAC: tampered field at exp+600 is 401", async () => {
+          const checkout = signedAtT0();
+          vi.setSystemTime((Number(expAt) + 600) * 1000);
+          const res = await post(bodyFor(checkout, { plan: "max" }));
+          expect(res.status).toBe(401);
+          expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+        });
+
+        it("grace does not allow replay: same txHash at exp+600 after settlement is 409", async () => {
+          const checkout = signedAtT0();
+          vi.setSystemTime((Number(expAt) + 600) * 1000);
+          mockTransfer();
+          const first = await post(bodyFor(checkout, { txHash: "0xgrace_replay_tx" }));
+          expect(first.status).toBe(200);
+          const again = await post(bodyFor(checkout, { txHash: "0xgrace_replay_tx" }));
+          expect(again.status).toBe(409);
+          expect((await again.json()).error).toBe("Transaction already submitted");
+        });
+      });
+
       it("rejects a signed intent submitted with idType \"email\" (401)", async () => {
         const checkout = buildSignedCheckoutBody(signedParams());
         const res = await post(bodyFor(checkout, { idType: "email", initData: undefined }));

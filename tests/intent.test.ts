@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   type IntentBody,
   findInvalidSignedIntentParams,
+  UNSIGNED_UI_KEYS,
   isUnexpiredExp,
   INTENT_PARAM_KEYS,
   INTENT_PARAM_TO_BODY_FIELD,
@@ -228,6 +229,47 @@ describe("findInvalidSignedIntentParams: pre-send sig/exp guard", () => {
   it("does not check exp on an unsigned link", () => {
     const { sig: _s, exp: _e, ...rest } = base;
     expect(findInvalidSignedIntentParams(new URLSearchParams(rest), NOW)).toEqual([]);
+  });
+});
+
+describe("findInvalidSignedIntentParams: settleable + closed signed links (#58 r6)", () => {
+  const NOW = 1_700_000_000;
+  const base = { uid: "7", idtype: "tg", exp: String(NOW + 600), plan: "starter", sig: "abc" };
+
+  it("reports a signed link with neither plan nor topup", () => {
+    const { plan: _p, ...rest } = base;
+    expect(findInvalidSignedIntentParams(new URLSearchParams({ ...rest, amountUsd: "42.00" }), NOW)).toEqual(["plan"]);
+  });
+
+  it("accepts a topup-only signed link", () => {
+    const { plan: _p, ...rest } = base;
+    expect(findInvalidSignedIntentParams(new URLSearchParams({ ...rest, topup: "small" }), NOW)).toEqual([]);
+  });
+
+  it("does not require plan/topup on an unsigned link", () => {
+    const { plan: _p, sig: _s, ...rest } = base;
+    expect(findInvalidSignedIntentParams(new URLSearchParams(rest), NOW)).toEqual([]);
+  });
+
+  it("reports unknown keys on a signed link (fail closed)", () => {
+    const params = new URLSearchParams({
+      uid: "42", idtype: "tg", exp: String(NOW + 600), plan: "max", vmp: "lxd",
+      hostType: "vps", deploymentType: "hermes", nonce: "123", sig: "x",
+    });
+    expect(findInvalidSignedIntentParams(params, NOW)).toEqual(["nonce"]);
+  });
+
+  it("allows only the minimal UI allowlist (test) as unsigned keys", () => {
+    expect(UNSIGNED_UI_KEYS).toEqual(["test"]);
+    expect(findInvalidSignedIntentParams(new URLSearchParams({ ...base, test: "true" }), NOW)).toEqual([]);
+    for (const key of ["token", "chain", "apiKey", "initData", "utm_source"]) {
+      expect(findInvalidSignedIntentParams(new URLSearchParams({ ...base, [key]: "v" }), NOW), key).toEqual([key]);
+    }
+  });
+
+  it("ignores unknown keys on an unsigned link", () => {
+    const { sig: _s, ...rest } = base;
+    expect(findInvalidSignedIntentParams(new URLSearchParams({ ...rest, nonce: "1" }), NOW)).toEqual([]);
   });
 });
 

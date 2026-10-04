@@ -3,7 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { cors } from "hono/cors";
 import { loadConfig, type ChainId, type TokenId, TOKEN_ADDRESSES } from "./config.ts";
-import { canonicalIntentString } from "./intent.ts";
+import { canonicalIntentString, EXP_POST_GRACE_SEC } from "./intent.ts";
 import {
   createDB,
   type DB,
@@ -126,7 +126,11 @@ export function createApp(injectedDb?: DB) {
   }): boolean {
     if (!config.checkoutSecret || !input.exp || !input.sig) return false;
     const exp = Number(input.exp);
-    if (!Number.isFinite(exp) || exp < Math.floor(Date.now() / 1000)) return false;
+    // Grace window after exp: a transfer the page started before expiry may be
+    // mined and POSTed after it (wallet approval latency). The HMAC still binds
+    // exp and every other field, and replaying one tx is blocked by the
+    // duplicate-txHash check (getPaymentByTx -> 409, UNIQUE(tx_hash, chain_id)).
+    if (!Number.isFinite(exp) || exp + EXP_POST_GRACE_SEC < Math.floor(Date.now() / 1000)) return false;
     // Canonicalisation is shared with the pay page via src/intent.ts
     // (INTENT_PARAM_KEYS) so the two sides cannot drift.
     const canonical = canonicalIntentString(input);
