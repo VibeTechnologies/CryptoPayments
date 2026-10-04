@@ -316,6 +316,13 @@ export function createApp(injectedDb?: DB) {
       checkoutIntentVerified = true;
     }
 
+    // The apiKey is the operator (server-to-server) secret, so a valid apiKey
+    // is privileged regardless of which branch below authenticates.
+    const apiKeyVerified =
+      typeof body.apiKey === "string" &&
+      !!config.apiKey &&
+      timingSafeEqualStr(body.apiKey, config.apiKey);
+
     if (body.initData && config.telegramBotToken) {
       const result = await verifyTelegramInitData(body.initData, config.telegramBotToken);
       if (!result.valid) {
@@ -332,7 +339,7 @@ export function createApp(injectedDb?: DB) {
       }
       authed = true;
     } else if (body.apiKey) {
-      if (!config.apiKey || !timingSafeEqualStr(body.apiKey, config.apiKey)) {
+      if (!apiKeyVerified) {
         return c.json({ error: "Invalid API key" }, 401);
       }
       authed = true;
@@ -342,10 +349,10 @@ export function createApp(injectedDb?: DB) {
       return c.json({ error: "Authentication required" }, 401);
     }
 
-    // Placement/runtime fields are only trusted when covered by a verified
-    // checkout-intent HMAC. Unsigned (initData-only / apiKey) payments must not
-    // be able to inject them into the verification context or webhook.
-    if (!checkoutIntentVerified) {
+    // Placement/runtime fields are trusted under a verified checkout-intent
+    // HMAC or a valid operator apiKey. When auth came solely from unsigned
+    // Telegram initData, the end user could have injected them, so strip.
+    if (!checkoutIntentVerified && !apiKeyVerified) {
       delete body.tenantType;
       delete body.vmProvider;
       delete body.hostType;

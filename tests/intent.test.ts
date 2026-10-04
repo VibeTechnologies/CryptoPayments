@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   type IntentBody,
   findInvalidSignedIntentParams,
+  isUnexpiredExp,
   INTENT_PARAM_KEYS,
   INTENT_PARAM_TO_BODY_FIELD,
   buildPaymentBodyFromIntent,
@@ -204,6 +205,15 @@ describe("findInvalidSignedIntentParams: pre-send sig/exp guard", () => {
   it("reports exp <= now (boundary and past)", () => {
     expect(findInvalidSignedIntentParams(new URLSearchParams({ ...base, exp: String(NOW) }), NOW)).toEqual(["exp"]);
     expect(findInvalidSignedIntentParams(new URLSearchParams({ ...base, exp: String(NOW - 1) }), NOW)).toEqual(["exp"]);
+  });
+
+  it("reports a non-finite / unsafe-integer exp (310 nines) as invalid exp", () => {
+    const exp = "9".repeat(310); // all digits, but Number(exp) === Infinity
+    expect(findInvalidSignedIntentParams(new URLSearchParams({ ...base, exp }), NOW)).toEqual(["exp"]);
+    expect(isUnexpiredExp(exp, NOW)).toBe(false);
+    // Smallest digits-only value past Number.MAX_SAFE_INTEGER is rejected too.
+    expect(isUnexpiredExp("9007199254740992", NOW)).toBe(false);
+    expect(isUnexpiredExp(String(Number.MAX_SAFE_INTEGER), NOW)).toBe(true);
   });
 
   it("accepts exp in the future", () => {

@@ -251,17 +251,6 @@ function buildSignedCheckoutBody(params: Record<string, string>): Record<string,
   };
 }
 
-/**
- * exp + sig for a checkout intent carrying team/hetzner/vps placement plus the
- * given signed keys. Spread into an /api/payment body that already carries the
- * matching plain fields (tenantType/vmProvider/hostType/...).
- */
-function signedPlacement(extra: Record<string, string>): { exp: string; sig: string } {
-  const exp = String(Math.floor(Date.now() / 1000) + 600);
-  const params = { ...extra, idtype: "tg", exp, tenantType: "team", tenant: "team", vmp: "hetzner", hostType: "vps" };
-  return { exp, sig: signCheckoutIntent(params) };
-}
-
 describe("Server API", () => {
   let app: ReturnType<typeof createApp>;
   let mockDb: DB;
@@ -1527,13 +1516,6 @@ describe("Server API", () => {
           tenantType: "team",
           vmProvider: "hetzner",
           hostType: "vps",
-          // Placement fields are only trusted under a verified checkout intent.
-          ...signedPlacement({
-            plan: "starter",
-            topup: "medium",
-            uid: "42",
-            callback: "https://admin.openclaw.vibebrowser.app/webhook",
-          }),
         }),
       });
 
@@ -1575,6 +1557,59 @@ describe("Server API", () => {
       expect(body.payment.uid).toBe("42");
       expect(body.payment.idType).toBe("tg");
       expect(body.timestamp).toBeDefined();
+    });
+
+    // Regression (#58 r5): the apiKey is the operator's server-to-server
+    // secret, so apiKey-only auth (no sig, no initData) is privileged and its
+    // placement/runtime fields must reach the verification context and the
+    // callback. Only unsigned Telegram initData-only auth strips them.
+    it("apiKey-only (no sig) keeps vmProvider=lxd + deploymentType=hermes in metadata and callback", async () => {
+      const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+      globalThis.fetch = vi.fn(async (url: any, init?: any) => {
+        fetchCalls.push({ url: String(url), init });
+        return new Response("OK", { status: 200 });
+      }) as any;
+
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 12346,
+        txHash: "0xapikey_placement_tx",
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xapikey_placement_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          apiKey: "test-api-key",
+          callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
+          vmProvider: "lxd",
+          deploymentType: "hermes",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const payment = (await res.json()).payment;
+      expect(payment.status).toBe("verified");
+      expect(payment.metadata).toMatchObject({ vmProvider: "lxd", deploymentType: "hermes" });
+
+      await new Promise((r) => setTimeout(r, 100));
+      const cb = fetchCalls.find(
+        (c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook" && String(c.init.body).includes("0xapikey_placement_tx"),
+      );
+      expect(cb).toBeDefined();
+      const cbPayment = JSON.parse(cb!.init.body as string).payment;
+      expect(cbPayment.vmProvider).toBe("lxd");
+      expect(cbPayment.deploymentType).toBe("hermes");
     });
 
     it("includes topup field in callback payload when topup is set", async () => {
@@ -1814,12 +1849,6 @@ describe("Server API", () => {
           tenantType: "team",
           vmProvider: "hetzner",
           hostType: "vps",
-          // Placement fields are only trusted under a verified checkout intent.
-          ...signedPlacement({
-            plan: "starter",
-            uid: "77",
-            callback: "https://admin.openclaw.vibebrowser.app/webhook",
-          }),
         }),
       });
       expect(postRes.status).toBe(202);

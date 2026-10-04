@@ -4,7 +4,10 @@ import { useEffect, useState, useCallback } from "react";
 import { fetchConfig, submitPayment, checkPaymentStatus } from "@/lib/api";
 import {
   buildPaymentBodyFromIntent,
+  canonicalIntentString,
   findInvalidSignedIntentParams,
+  isUnexpiredExp,
+  rawIntentCanonicalString,
   type IntentBody,
 } from "@/lib/intent";
 
@@ -30,9 +33,10 @@ function signedLinkError(
 ): string | null {
   if (!params.has("sig")) return null;
   const invalid = findInvalidSignedIntentParams(params, nowSec);
-  if (invalid.length === 1 && invalid[0] === "exp" && params.get("exp")) {
-    const exp = params.get("exp")!;
-    if (/^\d+$/.test(exp)) return EXPIRED_SIGNED_LINK_MESSAGE;
+  if (invalid.length === 1 && invalid[0] === "exp") {
+    // Well-formed but lapsed (would be valid with an earlier clock) -> expired;
+    // malformed / non-finite (e.g. 310 nines) -> invalid.
+    if (isUnexpiredExp(params.get("exp"), -1)) return EXPIRED_SIGNED_LINK_MESSAGE;
   }
   if (invalid.length > 0) return INVALID_SIGNED_LINK_MESSAGE;
   if (telegramUserId !== null && telegramUserId !== params.get("uid")) {
@@ -40,6 +44,25 @@ function signedLinkError(
   }
   return null;
 }
+/**
+ * The exact signed fields POSTed for a signed link: URL-derived only, never
+ * defaulted (no implicit plan="starter", no Telegram-derived uid/idType).
+ * `sig` is included; it is not part of the canonical string.
+ */
+function signedPostFields(params: URLSearchParams): IntentBody {
+  return buildPaymentBodyFromIntent(params);
+}
+
+/**
+ * Final parity guard at the wallet-send boundary: the canonical string of the
+ * signed fields that will be POSTed must equal the raw canonical string of the
+ * URL the signer HMAC'd. Otherwise the server would 401 after the transfer.
+ */
+function signedFieldsMatchUrl(fields: IntentBody, params: URLSearchParams): boolean {
+  if (fields.idType !== "tg") return false;
+  return canonicalIntentString(fields) === rawIntentCanonicalString(params);
+}
+
 import {
   type AppConfig,
   type ChainId,
@@ -256,6 +279,11 @@ export default function PayPage() {
       setStatus({ type: "error", message: err });
       return false;
     }
+    if (urlParams.get("sig") && !signedFieldsMatchUrl(signedPostFields(urlParams), urlParams)) {
+      setInvalidSignedLink(true);
+      setStatus({ type: "error", message: INVALID_SIGNED_LINK_MESSAGE });
+      return false;
+    }
     return true;
   }, [invalidSignedLink, urlParams, telegramUserId]);
 
@@ -270,7 +298,7 @@ export default function PayPage() {
       await doSubmit(hash);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedChain, selectedToken, idType, uid, plan, topup, callbackUrl, initData, intentBody, invalidSignedLink],
+    [selectedChain, selectedToken, idType, uid, plan, topup, callbackUrl, initData, intentBody, invalidSignedLink, urlParams],
   );
 
   // Submit payment for verification
@@ -283,28 +311,46 @@ export default function PayPage() {
     setStatus({ type: "pending", message: "Verifying transaction on-chain..." });
 
     try {
-      // Signed link (non-empty sig): every signed field, idType included, is
-      // sent verbatim from the URL. Unsigned (legacy) link: the page's own
-      // idType wins and placement/runtime fields are NOT forwarded (they are
-      // only trusted under a signature).
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { idType: _urlIdType, ...unsignedIntentFields } = intentBody;
-      for (const field of SIGNED_ONLY_BODY_FIELDS) delete unsignedIntentFields[field];
-      const intentFields = intentBody.sig ? intentBody : unsignedIntentFields;
-      const result = await submitPayment({
+      const transport = {
         txHash: hash.trim(),
         chainId: selectedChain,
         token: selectedToken,
-        idType,
-        uid,
-        plan: topup ? undefined : plan,
-        topup: topup || undefined,
-        callbackUrl: callbackUrl || undefined,
         initData: initData || undefined,
-        // Signed intent params last so they are byte-identical to the URL and
-        // override display/auth state (never laundered by Telegram initData).
-        ...intentFields,
-      });
+      };
+      let result;
+      if (urlParams.get("sig")) {
+        // Signed link: ONLY the URL-derived signed fields (the same builder the
+        // pre-send parity guard checked) plus unsigned transport fields. No
+        // defaults for signed keys (no plan="starter", no Telegram uid).
+        const fields = signedPostFields(urlParams);
+        if (!signedFieldsMatchUrl(fields, urlParams)) {
+          setInvalidSignedLink(true);
+          setStatus({ type: "error", message: INVALID_SIGNED_LINK_MESSAGE });
+          return;
+        }
+        result = await submitPayment({
+          ...transport,
+          ...fields,
+          idType: fields.idType ?? "",
+          uid: fields.uid ?? "",
+        });
+      } else {
+        // Unsigned (legacy) link: the page's own idType wins and
+        // placement/runtime fields are NOT forwarded (only trusted under a
+        // signature).
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { idType: _urlIdType, ...unsignedIntentFields } = intentBody;
+        for (const field of SIGNED_ONLY_BODY_FIELDS) delete unsignedIntentFields[field];
+        result = await submitPayment({
+          ...transport,
+          idType,
+          uid,
+          plan: topup ? undefined : plan,
+          topup: topup || undefined,
+          callbackUrl: callbackUrl || undefined,
+          ...unsignedIntentFields,
+        });
+      }
 
       if (result.payment && result.payment.status !== "verified") {
         setStatus({ type: "pending", message: "Waiting for confirmation..." });

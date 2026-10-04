@@ -91,6 +91,17 @@ export function rawIntentCanonicalString(params: URLSearchParams): string {
 }
 
 /**
+ * True iff `exp` is a well-formed, unexpired signed expiry: all ASCII digits,
+ * a safe integer (rejects e.g. 310 nines, which parse to Infinity), and
+ * strictly greater than nowSec. Shared by the mount-time and send-time checks.
+ */
+export function isUnexpiredExp(exp: string | null, nowSec: number): boolean {
+  if (exp === null || !/^\d+$/.test(exp)) return false;
+  const n = Number(exp);
+  return Number.isSafeInteger(n) && n > nowSec;
+}
+
+/**
  * Signed URL keys that make a signed link unusable, checked BEFORE any
  * on-chain transfer. Returns:
  *   - every signed key (INTENT_PARAM_KEYS plus aliases) present with an empty
@@ -102,7 +113,8 @@ export function rawIntentCanonicalString(params: URLSearchParams): string {
  *   - any signed key, alias or `sig` that appears more than once;
  *   - "idtype" when idtype is not exactly "tg" (signed intents are
  *     Telegram-only; the server rejects anything else);
- *   - "exp" when exp is missing, not an integer, or <= nowSec (expired);
+ *   - "exp" when exp fails isUnexpiredExp (missing, not all digits, not a
+ *     safe integer, or <= nowSec);
  *   - "tenant" when tenant is present without tenantType or with a different
  *     value (the body has a single tenantType field, so it cannot round-trip);
  *   - the legacy alias "vmProvider" (signer emits `vmp`; the alias cannot
@@ -134,7 +146,7 @@ export function findInvalidSignedIntentParams(
   }
   if (params.get("idtype") !== "tg") add("idtype");
   const exp = params.get("exp");
-  if (exp === null || !/^\d+$/.test(exp) || Number(exp) <= nowSec) add("exp");
+  if (!isUnexpiredExp(exp, nowSec)) add("exp");
   if (params.has("tenant") && params.get("tenant") !== params.get("tenantType")) add("tenant");
   for (const alias of aliasKeys) {
     if (params.has(alias)) add(alias);

@@ -13,6 +13,22 @@ vi.mock("@/lib/api", () => ({
   checkPaymentStatus: vi.fn(),
 }));
 
+// Pass-through to the real intent contract. `tamper.on` makes ONLY the page's
+// own buildPaymentBodyFromIntent calls (not the module-internal ones used by
+// findInvalidSignedIntentParams) inject a default plan, simulating a body
+// regression so the send-boundary parity guard can be exercised for real.
+const tamper = vi.hoisted(() => ({ on: false }));
+vi.mock("@/lib/intent", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/intent")>();
+  return {
+    ...actual,
+    buildPaymentBodyFromIntent: (params: URLSearchParams) => {
+      const body = actual.buildPaymentBodyFromIntent(params);
+      return tamper.on ? { ...body, plan: body.plan ?? "starter" } : body;
+    },
+  };
+});
+
 vi.mock("@/lib/wallets/evm", () => ({
   isEvmAvailable: vi.fn(() => true),
   connectEvm: vi.fn(),
@@ -107,6 +123,7 @@ async function connectAndClickPay(user: ReturnType<typeof userEvent.setup>) {
 describe("PayPage wallet-send boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    tamper.on = false;
     (window as unknown as { Telegram?: unknown }).Telegram = undefined;
     vi.mocked(fetchConfig).mockResolvedValue(mockConfig as never);
     vi.mocked(connectEvm).mockResolvedValue({ signer: {} as never, address: ADDRESS });
@@ -160,6 +177,78 @@ describe("PayPage wallet-send boundary", () => {
     render(<PayPage />);
     await waitFor(() => expect(screen.getByText(INVALID_LINK)).toBeInTheDocument());
     await user.click(screen.getByTitle("Connect browser wallet"));
+    expect(sendEvmTransfer).not.toHaveBeenCalled();
+    expect(submitPayment).not.toHaveBeenCalled();
+  });
+
+  // Signed URL without plan/topup (#58 r5): display may default to starter
+  // pricing, but the POST must carry ONLY the URL-derived signed fields.
+  function noPlanParams(): Record<string, string> {
+    return {
+      uid: "12345",
+      idtype: "tg",
+      exp: "9999999999",
+      amountUsd: "42.00",
+      callback: "https://admin.openclaw.vibebrowser.app/webhook",
+      sig: "abc123",
+    };
+  }
+
+  it("signed URL with no plan/topup: transfer sent, POST has no plan and only signed + transport fields", async () => {
+    const user = userEvent.setup();
+    setUrlParams(noPlanParams());
+    mockTelegramUser(12345);
+    render(<PayPage />);
+    await connectAndClickPay(user);
+    const pay = await screen.findByRole("button", { name: /Pay \$42\.00/ });
+    await user.click(pay);
+    await waitFor(() => expect(sendEvmTransfer).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(submitPayment).toHaveBeenCalledTimes(1));
+    const sent = vi.mocked(submitPayment).mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(sent).not.toHaveProperty("plan");
+    expect(sent).not.toHaveProperty("topup");
+    const defined = Object.fromEntries(Object.entries(sent).filter(([, v]) => v !== undefined));
+    expect(defined).toEqual({
+      txHash: "0xmined",
+      chainId: "base",
+      token: "usdc",
+      initData: "signed_tg_init_data",
+      uid: "12345",
+      idType: "tg",
+      exp: "9999999999",
+      amountUsd: "42.00",
+      callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
+      sig: "abc123",
+    });
+  });
+
+  it("parity guard: if the signed POST body would differ from the URL, the real wallet send is blocked", async () => {
+    const user = userEvent.setup();
+    setUrlParams(noPlanParams());
+    mockTelegramUser(12345);
+    render(<PayPage />);
+    await connectAndClickPay(user);
+    const pay = await screen.findByRole("button", { name: /Pay \$42\.00/ });
+    expect(pay).not.toBeDisabled();
+
+    // The body builder now injects plan="starter" (not in the signed URL).
+    tamper.on = true;
+    await user.click(pay);
+
+    await waitFor(() => expect(screen.getByText(INVALID_LINK)).toBeInTheDocument());
+    expect(sendEvmTransfer).not.toHaveBeenCalled();
+    expect(submitPayment).not.toHaveBeenCalled();
+  });
+
+  it("exp of 310 nines (non-finite): invalid link, transfer never initiated", async () => {
+    const user = userEvent.setup();
+    setUrlParams({ ...noPlanParams(), exp: "9".repeat(310) });
+    mockTelegramUser(12345);
+    render(<PayPage />);
+    await waitFor(() => expect(screen.getByText(INVALID_LINK)).toBeInTheDocument());
+    expect(screen.queryByText(EXPIRED_LINK)).not.toBeInTheDocument();
+    await user.click(screen.getByTitle("Connect browser wallet"));
+    expect(screen.queryByRole("button", { name: /Pay \$/ })).not.toBeInTheDocument();
     expect(sendEvmTransfer).not.toHaveBeenCalled();
     expect(submitPayment).not.toHaveBeenCalled();
   });
