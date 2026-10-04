@@ -292,12 +292,41 @@ export function createApp(injectedDb?: DB) {
     // ── Auth (optional but recommended) ──
     let authed = false;
     let checkoutIntentVerified = false;
+    // A submitted `sig` means the body claims a signed checkout intent. It MUST
+    // verify over the submitted body regardless of initData/apiKey, otherwise
+    // valid initData could carry tampered signed fields (vmp, deploymentType,
+    // amountUsd...) into the verification context and webhook.
+    if (body.sig !== undefined && body.sig !== null) {
+      // Signed intents are Telegram-only: the canonical string always uses
+      // idtype=tg, so any other submitted idType is a mismatch.
+      if (body.idType !== undefined && body.idType !== "tg") {
+        return c.json({ error: "Authentication required" }, 401);
+      }
+      let verified = false;
+      try {
+        verified = verifyCheckoutIntent(body);
+      } catch (e) {
+        console.error("verifyCheckoutIntent crashed:", e);
+      }
+      if (!verified) {
+        return c.json({ error: "Authentication required" }, 401);
+      }
+      body.idType = "tg";
+      authed = true;
+      checkoutIntentVerified = true;
+    }
+
     if (body.initData && config.telegramBotToken) {
       const result = await verifyTelegramInitData(body.initData, config.telegramBotToken);
       if (!result.valid) {
         return c.json({ error: "Invalid Telegram initData" }, 401);
       }
       if (result.user) {
+        // The signed uid is authoritative; initData for a different user
+        // must not be able to redirect a signed intent.
+        if (checkoutIntentVerified && String(result.user.id) !== String(body.uid)) {
+          return c.json({ error: "Authentication required" }, 401);
+        }
         body.idType = "tg";
         body.uid = String(result.user.id);
       }
@@ -307,15 +336,6 @@ export function createApp(injectedDb?: DB) {
         return c.json({ error: "Invalid API key" }, 401);
       }
       authed = true;
-    } else {
-      try {
-        if (verifyCheckoutIntent(body)) {
-          authed = true;
-          checkoutIntentVerified = true;
-        }
-      } catch (e) {
-        console.error("verifyCheckoutIntent crashed:", e);
-      }
     }
 
     if (!authed) {

@@ -45,23 +45,25 @@ export type IntentBody = Partial<Record<IntentBodyField | "sig", string>>;
 
 /**
  * Map URL query params to the /api/payment body fields for the signed intent.
- * Values are forwarded byte-for-byte; absent or empty params are omitted.
+ * Values are forwarded byte-for-byte. A signed key present in the URL with an
+ * empty value (e.g. `vmp=`) is forwarded as "" rather than dropped, so the
+ * server sees exactly what the URL carried; absent keys are omitted.
  * `sig` is forwarded unchanged when present.
  */
 export function buildPaymentBodyFromIntent(params: URLSearchParams): IntentBody {
   const body: IntentBody = {};
   for (const key of INTENT_PARAM_KEYS) {
     const value = params.get(key);
-    if (!value) continue;
+    if (value === null) continue;
     const field = INTENT_PARAM_TO_BODY_FIELD[key];
-    // tenantType wins over its `tenant` mirror if both are present.
-    if (body[field] !== undefined) continue;
+    // tenantType wins over its `tenant` mirror if both are non-empty.
+    if (body[field]) continue;
     body[field] = value;
   }
   for (const [alias, key] of Object.entries(INTENT_PARAM_ALIASES)) {
     const field = INTENT_PARAM_TO_BODY_FIELD[key];
     const value = params.get(alias);
-    if (value && body[field] === undefined) body[field] = value;
+    if (value !== null && body[field] === undefined) body[field] = value;
   }
   const sig = params.get("sig");
   if (sig) body.sig = sig;
@@ -72,6 +74,10 @@ export function buildPaymentBodyFromIntent(params: URLSearchParams): IntentBody 
  * Canonical string the HMAC is computed over, rebuilt from an /api/payment
  * body. Sorted `key=value` lines joined by "\n". `idtype` is always "tg"
  * (signed intents are Telegram-only); `uid` and `exp` are always present.
+ *
+ * Empty optional values are OMITTED (`vmp=` canonicalises the same as no
+ * `vmp` at all). This keeps signatures stable whether a signer emits an empty
+ * key or leaves it out, and matches the pre-shared-module server behaviour.
  */
 export function canonicalIntentString(body: Partial<Record<IntentBodyField, string | undefined>>): string {
   const entries: [string, string][] = [];

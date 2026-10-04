@@ -227,6 +227,23 @@ function signCheckoutIntent(params: Record<string, string>): string {
     .digest("hex");
 }
 
+/** Valid Telegram initData signed with TELEGRAM_BOT_TOKEN (same algorithm as tests/telegram.test.ts). */
+function buildInitData(userId: number, botToken = "123456:TestBotToken"): string {
+  const params: Record<string, string> = {
+    auth_date: String(Math.floor(Date.now() / 1000)),
+    user: JSON.stringify({ id: userId, first_name: "Test" }),
+  };
+  const dataCheckString = Object.entries(params)
+    .map(([k, v]) => `${k}=${v}`)
+    .sort()
+    .join("\n");
+  const secretKey = createHmac("sha256", "WebAppData").update(botToken).digest();
+  const hash = createHmac("sha256", secretKey).update(dataCheckString).digest("hex");
+  const sp = new URLSearchParams(params);
+  sp.set("hash", hash);
+  return sp.toString();
+}
+
 function buildSignedCheckoutBody(params: Record<string, string>): Record<string, string> {
   return {
     ...params,
@@ -1006,6 +1023,111 @@ describe("Server API", () => {
       const body = await res.json();
       expect(body.payment.status).toBe("verified");
       expect(body.payment.plan_id).toBe("max");
+    });
+
+    describe("signed intent + initData", () => {
+      const exp = () => String(Math.floor(Date.now() / 1000) + 600);
+      const signedParams = () => ({
+        plan: "starter",
+        uid: "42",
+        idtype: "tg",
+        amountUsd: "10.00",
+        exp: exp(),
+        tenantType: "personal",
+        tenant: "personal",
+        vmp: "lxd",
+        hostType: "vps",
+        deploymentType: "hermes",
+      });
+      const bodyFor = (checkout: Record<string, string>, overrides: Record<string, unknown> = {}) => ({
+        txHash: "0xsigned_initdata_tx",
+        chainId: "base",
+        token: "usdc",
+        idType: "tg",
+        uid: checkout.uid,
+        plan: checkout.plan,
+        amountUsd: checkout.amountUsd,
+        tenantType: checkout.tenantType,
+        vmProvider: checkout.vmp,
+        hostType: checkout.hostType,
+        deploymentType: checkout.deploymentType,
+        exp: checkout.exp,
+        sig: checkout.sig,
+        initData: buildInitData(42),
+        ...overrides,
+      });
+      const post = (body: unknown) =>
+        app.request("/api/payment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      const mockTransfer = () =>
+        mockedVerifyTransfer.mockResolvedValueOnce({
+          from: "0xSender",
+          to: "0xTestBaseWallet",
+          amountRaw: "10000000",
+          amountUsd: 10,
+          token: "usdc",
+          blockNumber: 77001,
+          txHash: "0xsigned_initdata_tx",
+        });
+
+      it("rejects valid initData with a tampered signed vmp (401)", async () => {
+        const checkout = buildSignedCheckoutBody(signedParams());
+        const res = await post(bodyFor(checkout, { vmProvider: "azure" }));
+        expect(res.status).toBe(401);
+        expect((await res.json()).error).toBe("Authentication required");
+        expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+      });
+
+      it("rejects valid initData with a tampered signed deploymentType (401)", async () => {
+        const checkout = buildSignedCheckoutBody(signedParams());
+        const res = await post(bodyFor(checkout, { deploymentType: "openclaw" }));
+        expect(res.status).toBe(401);
+        expect((await res.json()).error).toBe("Authentication required");
+        expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+      });
+
+      it("rejects valid initData for a different user than the signed uid (401)", async () => {
+        const checkout = buildSignedCheckoutBody(signedParams());
+        const res = await post(bodyFor(checkout, { initData: buildInitData(999) }));
+        expect(res.status).toBe(401);
+        expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+      });
+
+      it("passes auth with valid initData + valid signed intent", async () => {
+        mockTransfer();
+        const checkout = buildSignedCheckoutBody(signedParams());
+        const res = await post(bodyFor(checkout));
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.payment.status).toBe("verified");
+        expect(body.payment.uid).toBe("42");
+      });
+
+      it("rejects a signed intent submitted with idType \"email\" (401)", async () => {
+        const checkout = buildSignedCheckoutBody(signedParams());
+        const res = await post(bodyFor(checkout, { idType: "email", initData: undefined }));
+        expect(res.status).toBe(401);
+        expect((await res.json()).error).toBe("Authentication required");
+        expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+      });
+
+      it("still accepts legacy initData-only requests (no sig)", async () => {
+        mockTransfer();
+        const res = await post({
+          txHash: "0xsigned_initdata_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          initData: buildInitData(42),
+        });
+        expect(res.status).toBe(200);
+        expect((await res.json()).payment.status).toBe("verified");
+      });
     });
 
     it("stores topup_id when topup param is provided", async () => {

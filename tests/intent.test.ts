@@ -84,4 +84,14 @@ describe("checkout intent contract (src/intent.ts)", () => {
   it("omits absent params", () => {
     expect(buildPaymentBodyFromIntent(new URLSearchParams({ uid: "1" }))).toEqual({ uid: "1" });
   });
+
+  it("forwards a present-but-empty signed key (vmp=) as \"\" without changing the canonical string", () => {
+    const base = { uid: "7", idtype: "tg", exp: "9999999999", plan: "starter" };
+    const withEmpty = new URLSearchParams({ ...base, vmp: "" });
+    const body = buildPaymentBodyFromIntent(withEmpty);
+    expect(body).toHaveProperty("vmProvider", "");
+    const without = buildPaymentBodyFromIntent(new URLSearchParams(base));
+    expect(without).not.toHaveProperty("vmProvider");
+    expect(canonicalIntentString(body)).toBe(canonicalIntentString(without));
+  });
 });

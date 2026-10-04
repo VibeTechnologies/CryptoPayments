@@ -207,6 +207,10 @@ export default function PayPage() {
     setStatus({ type: "pending", message: "Verifying transaction on-chain..." });
 
     try {
+      // Signed idtype is always "tg" (server enforces it); the page's own
+      // idType state, parsed from the same URL param, is what we submit.
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { idType: _signedIdType, ...signedIntentFields } = intentBody;
       const result = await submitPayment({
         txHash: hash.trim(),
         chainId: selectedChain,
@@ -218,7 +222,7 @@ export default function PayPage() {
         callbackUrl: callbackUrl || undefined,
         initData: initData || undefined,
         // Signed intent params last so they are byte-identical to the URL.
-        ...intentBody,
+        ...signedIntentFields,
       });
 
       if (result.payment && result.payment.status !== "verified") {

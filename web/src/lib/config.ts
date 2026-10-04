@@ -20,8 +20,7 @@ export interface PaymentRequest {
   txHash: string;
   chainId: ChainId;
   token: TokenId;
-  /** "tg" | "email"; typed as string because the signed `idtype` is forwarded verbatim (server validates). */
-  idType: string;
+  idType: "tg" | "email";
   uid: string;
   plan?: string;
   topup?: string;
