@@ -213,6 +213,7 @@ function createMockSupabase(): DB {
 // ── Import after env + mocks are set ─────────────────────────────────────────
 const { createApp } = await import("../src/server.js");
 const { verifyTransfer } = await import("../src/verify.js");
+const { buildPaymentBodyFromIntent } = await import("../src/intent.js");
 const mockedVerifyTransfer = vi.mocked(verifyTransfer);
 
 function signCheckoutIntent(params: Record<string, string>): string {
@@ -774,6 +775,116 @@ describe("Server API", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.payment.status).toBe("verified");
+    });
+
+    // Regression: the pay page whitelisted vmp ∈ {azure, hetzner} and dropped
+    // AgentPod's signed vmp=lxd, so the recomputed canonical string diverged
+    // and /api/payment 401'd after the on-chain transfer was mined.
+    it("accepts a signed checkout intent with vmp=lxd, hostType=vps, deploymentType=hermes, plan=max", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xWallet",
+        amountRaw: "105000000",
+        amountUsd: 105,
+        blockNumber: 123,
+        txHash: "0xsigned_intent_lxd_tx",
+      });
+
+      const checkout = buildSignedCheckoutBody({
+        plan: "max",
+        uid: "42",
+        idtype: "tg",
+        amountUsd: "105.00",
+        exp: String(Math.floor(Date.now() / 1000) + 600),
+        vmp: "lxd",
+        hostType: "vps",
+        deploymentType: "hermes",
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xsigned_intent_lxd_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "max",
+          amountUsd: checkout.amountUsd,
+          vmProvider: "lxd",
+          hostType: "vps",
+          deploymentType: "hermes",
+          exp: checkout.exp,
+          sig: checkout.sig,
+        }),
+      });
+
+      expect(res.status).not.toBe(401);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.payment.status).toBe("verified");
+      expect(body.payment.plan_id).toBe("max");
+    });
+
+    // Class guard: whatever the signer puts in the URL, the pay page's body
+    // (built by the shared buildPaymentBodyFromIntent) must verify. Signed
+    // with an independent oracle (signCheckoutIntent over the raw URL params),
+    // not with INTENT_PARAM_KEYS, so a key dropped from the shared list fails.
+    it("verifies a body built by buildPaymentBodyFromIntent from a fully-signed URL", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xWallet",
+        amountRaw: "105000000",
+        amountUsd: 105,
+        blockNumber: 123,
+        txHash: "0xsigned_intent_full_tx",
+      });
+
+      const signed = buildSignedCheckoutBody({
+        plan: "max",
+        uid: "42",
+        idtype: "tg",
+        amountUsd: "105.00",
+        exp: String(Math.floor(Date.now() / 1000) + 600),
+        callback: "https://admin.openclaw.vibebrowser.app/webhook",
+        tenantType: "team",
+        tenant: "team",
+        vmp: "lxd",
+        hostType: "vps",
+        deploymentType: "hermes",
+      });
+      const intent = buildPaymentBodyFromIntent(new URLSearchParams(signed));
+
+      // The signed callback fires async; capture it locally so it cannot leak
+      // into later tests' fetch mocks.
+      const originalFetch = globalThis.fetch;
+      const callbackPayloads: Array<Record<string, any>> = [];
+      globalThis.fetch = vi.fn(async (_url: any, init?: any) => {
+        callbackPayloads.push(JSON.parse(String(init?.body ?? "{}")));
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+      try {
+        const res = await app.request("/api/payment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            txHash: "0xsigned_intent_full_tx",
+            chainId: "base",
+            token: "usdc",
+            ...intent,
+          }),
+        });
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.payment.status).toBe("verified");
+        await vi.waitFor(() => expect(callbackPayloads.length).toBeGreaterThan(0));
+        expect(callbackPayloads[0].payment.vmProvider).toBe("lxd");
+        expect(callbackPayloads[0].payment.deploymentType).toBe("hermes");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     });
 
     // The runtime selection must stay AUTHENTICATED. If deploymentType were

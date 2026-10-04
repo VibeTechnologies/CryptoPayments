@@ -20,13 +20,15 @@ export interface PaymentRequest {
   txHash: string;
   chainId: ChainId;
   token: TokenId;
-  idType: "tg" | "email";
+  /** "tg" | "email"; typed as string because the signed `idtype` is forwarded verbatim (server validates). */
+  idType: string;
   uid: string;
   plan?: string;
   topup?: string;
-  tenantType?: "personal" | "team";
-  vmProvider?: "azure" | "hetzner";
-  hostType?: "vps";
+  // Signed intent fields are forwarded verbatim; never narrow them here.
+  tenantType?: string;
+  vmProvider?: string;
+  hostType?: string;
   /** Tenant runtime selector (openclaw | hermes). Covered by the intent signature. */
   deploymentType?: string;
   amountUsd?: string;

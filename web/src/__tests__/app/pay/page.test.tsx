@@ -44,6 +44,7 @@ vi.mock("@/components/wallet-connect", () => ({
 
 import { fetchConfig, submitPayment } from "@/lib/api";
 import PayPage from "@/app/pay/page";
+import { INTENT_PARAM_KEYS, INTENT_PARAM_TO_BODY_FIELD, canonicalIntentString } from "@/lib/intent";
 
 const mockConfig = {
   wallets: {
@@ -248,6 +249,44 @@ describe("PayPage", () => {
       exp: "9999999999",
       sig: "abc123",
     });
+  });
+
+  // Class guard: the page must forward EVERY signed intent key verbatim. The
+  // old per-field whitelist dropped vmp=lxd (AgentPod) and 401'd post-payment.
+  it("forwards every signed intent param verbatim (vmp=lxd, unknown hostType, ...)", async () => {
+    const user = userEvent.setup();
+    const intent: Record<string, string> = {
+      plan: "max",
+      uid: "12345",
+      idtype: "tg",
+      amountUsd: "105.00",
+      exp: "9999999999",
+      callback: "https://cb.example/hook?a=1&b=2",
+      tenantType: "Team Ünicode",
+      tenant: "Team Ünicode",
+      vmp: "lxd",
+      hostType: "bare-metal",
+      deploymentType: "hermes",
+    };
+    setUrlParams({ ...intent, sig: "abc123" });
+    vi.mocked(submitPayment).mockResolvedValue({ payment: { status: "verified", id: "p1" } } as unknown as Awaited<ReturnType<typeof submitPayment>>);
+
+    render(<PayPage />);
+    await waitFor(() => expect(screen.getByTestId("mock-tx-sent")).toBeInTheDocument());
+    await user.click(screen.getByTestId("mock-tx-sent"));
+
+    await waitFor(() => expect(submitPayment).toHaveBeenCalled());
+    const sent = vi.mocked(submitPayment).mock.calls[0][0] as unknown as Record<string, string>;
+    for (const key of INTENT_PARAM_KEYS) {
+      if (key === "topup") continue; // not in this URL
+      expect(sent[INTENT_PARAM_TO_BODY_FIELD[key]], key).toBe(intent[key]);
+    }
+    expect(sent.sig).toBe("abc123");
+    const urlCanonical = Object.entries(intent)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => `${k}=${v}`)
+      .join("\n");
+    expect(canonicalIntentString(sent)).toBe(urlCanonical);
   });
 
   it("omits deploymentType when the intent does not carry one (legacy openclaw)", async () => {

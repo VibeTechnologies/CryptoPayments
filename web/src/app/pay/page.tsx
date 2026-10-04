@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { fetchConfig, submitPayment, checkPaymentStatus } from "@/lib/api";
+import { buildPaymentBodyFromIntent, type IntentBody } from "@/lib/intent";
 import {
   type AppConfig,
   type ChainId,
@@ -51,13 +52,9 @@ export default function PayPage() {
   const [uid, setUid] = useState("");
   const [idType, setIdType] = useState<"tg" | "email">("tg");
   const [callbackUrl, setCallbackUrl] = useState("");
-  const [tenantType, setTenantType] = useState<"personal" | "team" | "">("");
-  const [vmProvider, setVmProvider] = useState<"azure" | "hetzner" | "">("");
-  const [hostType, setHostType] = useState<"vps" | "">("");
-  const [deploymentType, setDeploymentType] = useState("");
-  const [amountUsd, setAmountUsd] = useState("");
-  const [intentExp, setIntentExp] = useState("");
-  const [intentSig, setIntentSig] = useState("");
+  // Signed checkout-intent params, forwarded VERBATIM to /api/payment.
+  // Never validate/normalise/default these client-side: the HMAC covers them.
+  const [intentBody, setIntentBody] = useState<IntentBody>({});
   const [initData, setInitData] = useState("");
   const [userName, setUserName] = useState("");
 
@@ -85,14 +82,8 @@ export default function PayPage() {
     let pPlan = params.get("plan") || "starter";
     const pTopup = params.get("topup") || "";
     let pIdType = (params.get("idtype") || "tg") as "tg" | "email";
-    let pCallback = params.get("callback") || "";
-    const pTenantType = params.get("tenantType") || params.get("tenant") || "";
-    const pVmProvider = params.get("vmp") || params.get("vmProvider") || "";
-    const pHostType = params.get("hostType") || "";
-    const pDeploymentType = params.get("deploymentType") || "";
-    const pAmountUsd = params.get("amountUsd") || "";
-    const pExp = params.get("exp") || "";
-    const pSig = params.get("sig") || "";
+    const pCallback = params.get("callback") || "";
+    const pIntent = buildPaymentBodyFromIntent(params);
     let pName = "";
 
     if (tg) {
@@ -123,13 +114,7 @@ export default function PayPage() {
     setUid(pUid);
     setIdType(pIdType);
     setCallbackUrl(pCallback);
-    setTenantType(pTenantType === "team" || pTenantType === "personal" ? pTenantType : "");
-    setVmProvider(pVmProvider === "azure" || pVmProvider === "hetzner" ? pVmProvider : "");
-    setHostType(pHostType === "vps" ? "vps" : "");
-    setDeploymentType(pDeploymentType);
-    setAmountUsd(pAmountUsd);
-    setIntentExp(pExp);
-    setIntentSig(pSig);
+    setIntentBody(pIntent);
     setUserName(pName || (pIdType === "tg" ? `User ${pUid}` : pUid));
 
     // Fetch config
@@ -138,6 +123,8 @@ export default function PayPage() {
       .catch(() => setStatus({ type: "error", message: "Failed to load payment configuration" }))
       .finally(() => setLoading(false));
   }, []);
+
+  const amountUsd = intentBody.amountUsd ?? "";
 
   // Reject unknown topup keys not backed by an explicit amount —
   // silently falling back would charge the wrong amount.
@@ -207,7 +194,7 @@ export default function PayPage() {
       await doSubmit(hash);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedChain, selectedToken, idType, uid, plan, topup, callbackUrl, initData, tenantType, vmProvider, hostType, deploymentType, amountUsd, intentExp, intentSig],
+    [selectedChain, selectedToken, idType, uid, plan, topup, callbackUrl, initData, intentBody],
   );
 
   // Submit payment for verification
@@ -228,15 +215,10 @@ export default function PayPage() {
         uid,
         plan: topup ? undefined : plan,
         topup: topup || undefined,
-        tenantType: tenantType || undefined,
-        vmProvider: vmProvider || undefined,
-        hostType: hostType || undefined,
-        deploymentType: deploymentType || undefined,
-        amountUsd: amountUsd || undefined,
         callbackUrl: callbackUrl || undefined,
         initData: initData || undefined,
-        exp: intentExp || undefined,
-        sig: intentSig || undefined,
+        // Signed intent params last so they are byte-identical to the URL.
+        ...intentBody,
       });
 
       if (result.payment && result.payment.status !== "verified") {

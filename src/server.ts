@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { cors } from "hono/cors";
 import { loadConfig, type ChainId, type TokenId, TOKEN_ADDRESSES } from "./config.ts";
+import { canonicalIntentString } from "./intent.ts";
 import {
   createDB,
   type DB,
@@ -126,25 +127,9 @@ export function createApp(injectedDb?: DB) {
     if (!config.checkoutSecret || !input.exp || !input.sig) return false;
     const exp = Number(input.exp);
     if (!Number.isFinite(exp) || exp < Math.floor(Date.now() / 1000)) return false;
-    const params = new URLSearchParams();
-    if (input.plan) params.set("plan", input.plan);
-    if (input.topup) params.set("topup", input.topup);
-    params.set("uid", input.uid);
-    params.set("idtype", "tg");
-    if (input.amountUsd) params.set("amountUsd", input.amountUsd);
-    params.set("exp", input.exp);
-    if (input.callbackUrl) params.set("callback", input.callbackUrl);
-    if (input.tenantType) {
-      params.set("tenantType", input.tenantType);
-      params.set("tenant", input.tenantType);
-    }
-    if (input.vmProvider) params.set("vmp", input.vmProvider);
-    if (input.hostType) params.set("hostType", input.hostType);
-    if (input.deploymentType) params.set("deploymentType", input.deploymentType);
-    const canonical = [...params.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, value]) => `${key}=${value}`)
-      .join("\n");
+    // Canonicalisation is shared with the pay page via src/intent.ts
+    // (INTENT_PARAM_KEYS) so the two sides cannot drift.
+    const canonical = canonicalIntentString(input);
     const expected = createHmac("sha256", config.checkoutSecret)
       .update(canonical)
       .digest("hex");
@@ -289,10 +274,13 @@ export function createApp(injectedDb?: DB) {
       uid: string;
       plan?: string;
       topup?: string;
-      tenantType?: "personal" | "team";
-      vmProvider?: "azure" | "hetzner";
-      hostType?: "vps";
-      deploymentType?: "openclaw" | "hermes";
+      // Signed intent fields are opaque strings: the HMAC is the validation.
+      // Narrow unions here invited client-side whitelists that laundered
+      // values (vmp=lxd) and broke the signature.
+      tenantType?: string;
+      vmProvider?: string;
+      hostType?: string;
+      deploymentType?: string;
       amountUsd?: string;
       callbackUrl?: string;
       initData?: string;
