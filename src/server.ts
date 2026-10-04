@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { cors } from "hono/cors";
 import { loadConfig, type ChainId, type TokenId, TOKEN_ADDRESSES } from "./config.ts";
+import { canonicalIntentString, EXP_POST_GRACE_SEC } from "./intent.ts";
 import {
   createDB,
   type DB,
@@ -125,26 +126,14 @@ export function createApp(injectedDb?: DB) {
   }): boolean {
     if (!config.checkoutSecret || !input.exp || !input.sig) return false;
     const exp = Number(input.exp);
-    if (!Number.isFinite(exp) || exp < Math.floor(Date.now() / 1000)) return false;
-    const params = new URLSearchParams();
-    if (input.plan) params.set("plan", input.plan);
-    if (input.topup) params.set("topup", input.topup);
-    params.set("uid", input.uid);
-    params.set("idtype", "tg");
-    if (input.amountUsd) params.set("amountUsd", input.amountUsd);
-    params.set("exp", input.exp);
-    if (input.callbackUrl) params.set("callback", input.callbackUrl);
-    if (input.tenantType) {
-      params.set("tenantType", input.tenantType);
-      params.set("tenant", input.tenantType);
-    }
-    if (input.vmProvider) params.set("vmp", input.vmProvider);
-    if (input.hostType) params.set("hostType", input.hostType);
-    if (input.deploymentType) params.set("deploymentType", input.deploymentType);
-    const canonical = [...params.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, value]) => `${key}=${value}`)
-      .join("\n");
+    // Grace window after exp: a transfer the page started before expiry may be
+    // mined and POSTed after it (wallet approval latency). The HMAC still binds
+    // exp and every other field, and replaying one tx is blocked by the
+    // duplicate-txHash check (getPaymentByTx -> 409, UNIQUE(tx_hash, chain_id)).
+    if (!Number.isFinite(exp) || exp + EXP_POST_GRACE_SEC < Math.floor(Date.now() / 1000)) return false;
+    // Canonicalisation is shared with the pay page via src/intent.ts
+    // (INTENT_PARAM_KEYS) so the two sides cannot drift.
+    const canonical = canonicalIntentString(input);
     const expected = createHmac("sha256", config.checkoutSecret)
       .update(canonical)
       .digest("hex");
@@ -289,10 +278,13 @@ export function createApp(injectedDb?: DB) {
       uid: string;
       plan?: string;
       topup?: string;
-      tenantType?: "personal" | "team";
-      vmProvider?: "azure" | "hetzner";
-      hostType?: "vps";
-      deploymentType?: "openclaw" | "hermes";
+      // Signed intent fields are opaque strings: the HMAC is the validation.
+      // Narrow unions here invited client-side whitelists that laundered
+      // values (vmp=lxd) and broke the signature.
+      tenantType?: string;
+      vmProvider?: string;
+      hostType?: string;
+      deploymentType?: string;
       amountUsd?: string;
       callbackUrl?: string;
       initData?: string;
@@ -304,34 +296,71 @@ export function createApp(injectedDb?: DB) {
     // ── Auth (optional but recommended) ──
     let authed = false;
     let checkoutIntentVerified = false;
+    // A submitted `sig` means the body claims a signed checkout intent. It MUST
+    // verify over the submitted body regardless of initData/apiKey, otherwise
+    // valid initData could carry tampered signed fields (vmp, deploymentType,
+    // amountUsd...) into the verification context and webhook.
+    if (body.sig !== undefined && body.sig !== null) {
+      // Signed intents are Telegram-only: the canonical string always uses
+      // idtype=tg, so any other submitted idType is a mismatch.
+      if (body.idType !== undefined && body.idType !== "tg") {
+        return c.json({ error: "Authentication required" }, 401);
+      }
+      let verified = false;
+      try {
+        verified = verifyCheckoutIntent(body);
+      } catch (e) {
+        console.error("verifyCheckoutIntent crashed:", e);
+      }
+      if (!verified) {
+        return c.json({ error: "Authentication required" }, 401);
+      }
+      body.idType = "tg";
+      authed = true;
+      checkoutIntentVerified = true;
+    }
+
+    // The apiKey is the operator (server-to-server) secret, so a valid apiKey
+    // is privileged regardless of which branch below authenticates.
+    const apiKeyVerified =
+      typeof body.apiKey === "string" &&
+      !!config.apiKey &&
+      timingSafeEqualStr(body.apiKey, config.apiKey);
+
     if (body.initData && config.telegramBotToken) {
       const result = await verifyTelegramInitData(body.initData, config.telegramBotToken);
       if (!result.valid) {
         return c.json({ error: "Invalid Telegram initData" }, 401);
       }
       if (result.user) {
+        // The signed uid is authoritative; initData for a different user
+        // must not be able to redirect a signed intent.
+        if (checkoutIntentVerified && String(result.user.id) !== String(body.uid)) {
+          return c.json({ error: "Authentication required" }, 401);
+        }
         body.idType = "tg";
         body.uid = String(result.user.id);
       }
       authed = true;
     } else if (body.apiKey) {
-      if (!config.apiKey || !timingSafeEqualStr(body.apiKey, config.apiKey)) {
+      if (!apiKeyVerified) {
         return c.json({ error: "Invalid API key" }, 401);
       }
       authed = true;
-    } else {
-      try {
-        if (verifyCheckoutIntent(body)) {
-          authed = true;
-          checkoutIntentVerified = true;
-        }
-      } catch (e) {
-        console.error("verifyCheckoutIntent crashed:", e);
-      }
     }
 
     if (!authed) {
       return c.json({ error: "Authentication required" }, 401);
+    }
+
+    // Placement/runtime fields are trusted under a verified checkout-intent
+    // HMAC or a valid operator apiKey. When auth came solely from unsigned
+    // Telegram initData, the end user could have injected them, so strip.
+    if (!checkoutIntentVerified && !apiKeyVerified) {
+      delete body.tenantType;
+      delete body.vmProvider;
+      delete body.hostType;
+      delete body.deploymentType;
     }
 
     // ── Validate inputs ──

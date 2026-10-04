@@ -47,6 +47,11 @@ interface WalletConnectProps {
   walletAddress: string;
   amount: number;
   onTxSent: (txHash: string) => void;
+  /**
+   * Called immediately before the wallet transfer is initiated. Return false
+   * to abort without sending (e.g. the signed payment link just expired).
+   */
+  beforeSend?: () => boolean;
   disabled?: boolean;
   onStatus: (type: StatusType, message: string) => void;
 }
@@ -58,6 +63,7 @@ export function WalletConnect({
   walletAddress,
   amount,
   onTxSent,
+  beforeSend,
   disabled,
   onStatus,
 }: WalletConnectProps) {
@@ -150,6 +156,8 @@ export function WalletConnect({
   }
 
   async function handleSend() {
+    if (disabled) return;
+    if (beforeSend && !beforeSend()) return;
     setSending(true);
     onStatus("pending", "Confirm the transaction in your wallet...");
     try {

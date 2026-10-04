@@ -34,16 +34,25 @@ vi.mock("@tonconnect/ui-react", () => ({
 
 // Mock WalletConnect so tests can trigger the tx-sent callback directly,
 // exercising PayPage's submit wiring without driving a real wallet.
+// The mock records its props so tests can assert the page disables payment.
+const walletConnectProps: Array<{ disabled?: boolean }> = [];
+function lastWalletConnectProps() {
+  return walletConnectProps[walletConnectProps.length - 1];
+}
 vi.mock("@/components/wallet-connect", () => ({
-  WalletConnect: ({ onTxSent }: { onTxSent: (hash: string) => void }) => (
-    <button data-testid="mock-tx-sent" onClick={() => onTxSent("0xdeadbeef")}>
-      mock send
-    </button>
-  ),
+  WalletConnect: (props: { onTxSent: (hash: string) => void; disabled?: boolean }) => {
+    walletConnectProps.push(props);
+    return (
+      <button data-testid="mock-tx-sent" onClick={() => props.onTxSent("0xdeadbeef")}>
+        mock send
+      </button>
+    );
+  },
 }));
 
 import { fetchConfig, submitPayment } from "@/lib/api";
 import PayPage from "@/app/pay/page";
+import { INTENT_PARAM_KEYS, INTENT_PARAM_TO_BODY_FIELD, canonicalIntentString } from "@/lib/intent";
 
 const mockConfig = {
   wallets: {
@@ -81,6 +90,7 @@ function setUrlParams(params: Record<string, string>) {
 describe("PayPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    walletConnectProps.length = 0;
     // Default: user identified via URL params
     setUrlParams({ uid: "12345", plan: "starter", idtype: "tg" });
     vi.mocked(fetchConfig).mockResolvedValue(mockConfig as any);
@@ -248,6 +258,130 @@ describe("PayPage", () => {
       exp: "9999999999",
       sig: "abc123",
     });
+  });
+
+  // Class guard: the page must forward EVERY signed intent key verbatim. The
+  // old per-field whitelist dropped vmp=lxd (AgentPod) and 401'd post-payment.
+  it("forwards every signed intent param verbatim (vmp=lxd, unknown hostType, ...)", async () => {
+    const user = userEvent.setup();
+    const intent: Record<string, string> = {
+      plan: "max",
+      uid: "12345",
+      idtype: "tg",
+      amountUsd: "105.00",
+      exp: "9999999999",
+      callback: "https://cb.example/hook?a=1&b=2",
+      tenantType: "Team Ünicode",
+      tenant: "Team Ünicode",
+      vmp: "lxd",
+      hostType: "bare-metal",
+      deploymentType: "hermes",
+    };
+    setUrlParams({ ...intent, sig: "abc123" });
+    vi.mocked(submitPayment).mockResolvedValue({ payment: { status: "verified", id: "p1" } } as unknown as Awaited<ReturnType<typeof submitPayment>>);
+
+    render(<PayPage />);
+    await waitFor(() => expect(screen.getByTestId("mock-tx-sent")).toBeInTheDocument());
+    await user.click(screen.getByTestId("mock-tx-sent"));
+
+    await waitFor(() => expect(submitPayment).toHaveBeenCalled());
+    const sent = vi.mocked(submitPayment).mock.calls[0][0] as unknown as Record<string, string>;
+    for (const key of INTENT_PARAM_KEYS) {
+      if (key === "topup") continue; // not in this URL
+      expect(sent[INTENT_PARAM_TO_BODY_FIELD[key]], key).toBe(intent[key]);
+    }
+    expect(sent.sig).toBe("abc123");
+    const urlCanonical = Object.entries(intent)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => `${k}=${v}`)
+      .join("\n");
+    expect(canonicalIntentString(sent)).toBe(urlCanonical);
+  });
+
+  function mockTelegramUser() {
+    window.Telegram = {
+      WebApp: {
+        ready: vi.fn(),
+        expand: vi.fn(),
+        close: vi.fn(),
+        initData: "signed_tg_init_data",
+        initDataUnsafe: { user: { id: 12345, first_name: "Alice" } },
+      },
+    };
+  }
+
+  const INVALID_LINK = "This payment link is invalid or was modified. Request a new link.";
+
+  // A signed idtype=email must not be laundered into "tg" by Telegram
+  // initData; the page must fail closed BEFORE the on-chain transfer.
+  it("blocks a signed idtype=email link inside Telegram (no POST)", async () => {
+    const user = userEvent.setup();
+    setUrlParams({ uid: "12345", plan: "max", idtype: "email", amountUsd: "100.00", exp: "9999999999", sig: "abc123" });
+    mockTelegramUser();
+
+    render(<PayPage />);
+    await waitFor(() => expect(screen.getByText(INVALID_LINK)).toBeInTheDocument());
+    expect(lastWalletConnectProps().disabled).toBe(true);
+    await user.click(screen.getByTestId("mock-tx-sent"));
+    expect(submitPayment).not.toHaveBeenCalled();
+  });
+
+  it("blocks a signed link carrying an empty signed key (vmp=) (no POST)", async () => {
+    const user = userEvent.setup();
+    setUrlParams({ uid: "12345", plan: "max", idtype: "tg", vmp: "", amountUsd: "100.00", exp: "9999999999", sig: "abc123" });
+
+    render(<PayPage />);
+    await waitFor(() => expect(screen.getByText(INVALID_LINK)).toBeInTheDocument());
+    expect(lastWalletConnectProps().disabled).toBe(true);
+    await user.click(screen.getByTestId("mock-tx-sent"));
+    expect(submitPayment).not.toHaveBeenCalled();
+  });
+
+  it("sends signed idType tg and vmProvider lxd verbatim inside Telegram", async () => {
+    const user = userEvent.setup();
+    setUrlParams({ uid: "12345", plan: "max", idtype: "tg", vmp: "lxd", amountUsd: "105.00", exp: "9999999999", sig: "abc123" });
+    mockTelegramUser();
+    vi.mocked(submitPayment).mockResolvedValue({ payment: { status: "verified", id: "p1" } } as unknown as Awaited<ReturnType<typeof submitPayment>>);
+
+    render(<PayPage />);
+    await waitFor(() => expect(screen.getByTestId("mock-tx-sent")).toBeInTheDocument());
+    expect(screen.queryByText(INVALID_LINK)).not.toBeInTheDocument();
+    expect(lastWalletConnectProps().disabled).toBe(false);
+    await user.click(screen.getByTestId("mock-tx-sent"));
+
+    await waitFor(() => expect(submitPayment).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(submitPayment).mock.calls[0][0]).toMatchObject({
+      idType: "tg",
+      vmProvider: "lxd",
+      uid: "12345",
+      sig: "abc123",
+      initData: "signed_tg_init_data",
+    });
+  });
+
+  it("unsigned link forwards no placement/runtime fields", async () => {
+    const user = userEvent.setup();
+    setUrlParams({
+      uid: "12345",
+      plan: "max",
+      idtype: "tg",
+      tenantType: "team",
+      tenant: "team",
+      vmp: "lxd",
+      hostType: "vps",
+      deploymentType: "hermes",
+    });
+    vi.mocked(submitPayment).mockResolvedValue({ payment: { status: "verified", id: "p1" } } as any);
+
+    render(<PayPage />);
+    await waitFor(() => expect(screen.getByTestId("mock-tx-sent")).toBeInTheDocument());
+    await user.click(screen.getByTestId("mock-tx-sent"));
+
+    await waitFor(() => expect(submitPayment).toHaveBeenCalled());
+    const sent = vi.mocked(submitPayment).mock.calls[0][0] as unknown as Record<string, unknown>;
+    for (const field of ["tenantType", "vmProvider", "hostType", "deploymentType", "sig"]) {
+      expect(sent, field).not.toHaveProperty(field);
+    }
   });
 
   it("omits deploymentType when the intent does not carry one (legacy openclaw)", async () => {

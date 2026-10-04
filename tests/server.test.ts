@@ -213,6 +213,7 @@ function createMockSupabase(): DB {
 // ── Import after env + mocks are set ─────────────────────────────────────────
 const { createApp } = await import("../src/server.js");
 const { verifyTransfer } = await import("../src/verify.js");
+const { buildPaymentBodyFromIntent } = await import("../src/intent.js");
 const mockedVerifyTransfer = vi.mocked(verifyTransfer);
 
 function signCheckoutIntent(params: Record<string, string>): string {
@@ -224,6 +225,23 @@ function signCheckoutIntent(params: Record<string, string>): string {
   return createHmac("sha256", "test-callback-secret")
     .update(canonical)
     .digest("hex");
+}
+
+/** Valid Telegram initData signed with TELEGRAM_BOT_TOKEN (same algorithm as tests/telegram.test.ts). */
+function buildInitData(userId: number, botToken = "123456:TestBotToken"): string {
+  const params: Record<string, string> = {
+    auth_date: String(Math.floor(Date.now() / 1000)),
+    user: JSON.stringify({ id: userId, first_name: "Test" }),
+  };
+  const dataCheckString = Object.entries(params)
+    .map(([k, v]) => `${k}=${v}`)
+    .sort()
+    .join("\n");
+  const secretKey = createHmac("sha256", "WebAppData").update(botToken).digest();
+  const hash = createHmac("sha256", secretKey).update(dataCheckString).digest("hex");
+  const sp = new URLSearchParams(params);
+  sp.set("hash", hash);
+  return sp.toString();
 }
 
 function buildSignedCheckoutBody(params: Record<string, string>): Record<string, string> {
@@ -776,6 +794,116 @@ describe("Server API", () => {
       expect(body.payment.status).toBe("verified");
     });
 
+    // Regression: the pay page whitelisted vmp ∈ {azure, hetzner} and dropped
+    // AgentPod's signed vmp=lxd, so the recomputed canonical string diverged
+    // and /api/payment 401'd after the on-chain transfer was mined.
+    it("accepts a signed checkout intent with vmp=lxd, hostType=vps, deploymentType=hermes, plan=max", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xWallet",
+        amountRaw: "105000000",
+        amountUsd: 105,
+        blockNumber: 123,
+        txHash: "0xsigned_intent_lxd_tx",
+      });
+
+      const checkout = buildSignedCheckoutBody({
+        plan: "max",
+        uid: "42",
+        idtype: "tg",
+        amountUsd: "105.00",
+        exp: String(Math.floor(Date.now() / 1000) + 600),
+        vmp: "lxd",
+        hostType: "vps",
+        deploymentType: "hermes",
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xsigned_intent_lxd_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "max",
+          amountUsd: checkout.amountUsd,
+          vmProvider: "lxd",
+          hostType: "vps",
+          deploymentType: "hermes",
+          exp: checkout.exp,
+          sig: checkout.sig,
+        }),
+      });
+
+      expect(res.status).not.toBe(401);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.payment.status).toBe("verified");
+      expect(body.payment.plan_id).toBe("max");
+    });
+
+    // Class guard: whatever the signer puts in the URL, the pay page's body
+    // (built by the shared buildPaymentBodyFromIntent) must verify. Signed
+    // with an independent oracle (signCheckoutIntent over the raw URL params),
+    // not with INTENT_PARAM_KEYS, so a key dropped from the shared list fails.
+    it("verifies a body built by buildPaymentBodyFromIntent from a fully-signed URL", async () => {
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xWallet",
+        amountRaw: "105000000",
+        amountUsd: 105,
+        blockNumber: 123,
+        txHash: "0xsigned_intent_full_tx",
+      });
+
+      const signed = buildSignedCheckoutBody({
+        plan: "max",
+        uid: "42",
+        idtype: "tg",
+        amountUsd: "105.00",
+        exp: String(Math.floor(Date.now() / 1000) + 600),
+        callback: "https://admin.openclaw.vibebrowser.app/webhook",
+        tenantType: "team",
+        tenant: "team",
+        vmp: "lxd",
+        hostType: "vps",
+        deploymentType: "hermes",
+      });
+      const intent = buildPaymentBodyFromIntent(new URLSearchParams(signed));
+
+      // The signed callback fires async; capture it locally so it cannot leak
+      // into later tests' fetch mocks.
+      const originalFetch = globalThis.fetch;
+      const callbackPayloads: Array<Record<string, any>> = [];
+      globalThis.fetch = vi.fn(async (_url: any, init?: any) => {
+        callbackPayloads.push(JSON.parse(String(init?.body ?? "{}")));
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+      try {
+        const res = await app.request("/api/payment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            txHash: "0xsigned_intent_full_tx",
+            chainId: "base",
+            token: "usdc",
+            ...intent,
+          }),
+        });
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.payment.status).toBe("verified");
+        await vi.waitFor(() => expect(callbackPayloads.length).toBeGreaterThan(0));
+        expect(callbackPayloads[0].payment.vmProvider).toBe("lxd");
+        expect(callbackPayloads[0].payment.deploymentType).toBe("hermes");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
     // The runtime selection must stay AUTHENTICATED. If deploymentType were
     // merely echoed back unsigned, anyone could swap the delivered product
     // after payment. A signature that omits it must not authorize it.
@@ -895,6 +1023,259 @@ describe("Server API", () => {
       const body = await res.json();
       expect(body.payment.status).toBe("verified");
       expect(body.payment.plan_id).toBe("max");
+    });
+
+    describe("signed intent + initData", () => {
+      const exp = () => String(Math.floor(Date.now() / 1000) + 600);
+      const signedParams = () => ({
+        plan: "starter",
+        uid: "42",
+        idtype: "tg",
+        amountUsd: "10.00",
+        exp: exp(),
+        tenantType: "personal",
+        tenant: "personal",
+        vmp: "lxd",
+        hostType: "vps",
+        deploymentType: "hermes",
+      });
+      const bodyFor = (checkout: Record<string, string>, overrides: Record<string, unknown> = {}) => ({
+        txHash: "0xsigned_initdata_tx",
+        chainId: "base",
+        token: "usdc",
+        idType: "tg",
+        uid: checkout.uid,
+        plan: checkout.plan,
+        amountUsd: checkout.amountUsd,
+        tenantType: checkout.tenantType,
+        vmProvider: checkout.vmp,
+        hostType: checkout.hostType,
+        deploymentType: checkout.deploymentType,
+        exp: checkout.exp,
+        sig: checkout.sig,
+        initData: buildInitData(42),
+        ...overrides,
+      });
+      const post = (body: unknown) =>
+        app.request("/api/payment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      const mockTransfer = () =>
+        mockedVerifyTransfer.mockResolvedValueOnce({
+          from: "0xSender",
+          to: "0xTestBaseWallet",
+          amountRaw: "10000000",
+          amountUsd: 10,
+          token: "usdc",
+          blockNumber: 77001,
+          txHash: "0xsigned_initdata_tx",
+        });
+
+      it("rejects valid initData with a tampered signed vmp (401)", async () => {
+        const checkout = buildSignedCheckoutBody(signedParams());
+        const res = await post(bodyFor(checkout, { vmProvider: "azure" }));
+        expect(res.status).toBe(401);
+        expect((await res.json()).error).toBe("Authentication required");
+        expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+      });
+
+      it("rejects valid initData with a tampered signed deploymentType (401)", async () => {
+        const checkout = buildSignedCheckoutBody(signedParams());
+        const res = await post(bodyFor(checkout, { deploymentType: "openclaw" }));
+        expect(res.status).toBe(401);
+        expect((await res.json()).error).toBe("Authentication required");
+        expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+      });
+
+      it("rejects valid initData for a different user than the signed uid (401)", async () => {
+        const checkout = buildSignedCheckoutBody(signedParams());
+        const res = await post(bodyFor(checkout, { initData: buildInitData(999) }));
+        expect(res.status).toBe(401);
+        expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+      });
+
+      it("passes auth with valid initData + valid signed intent", async () => {
+        mockTransfer();
+        const checkout = buildSignedCheckoutBody(signedParams());
+        const res = await post(bodyFor(checkout));
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.payment.status).toBe("verified");
+        expect(body.payment.uid).toBe("42");
+      });
+
+      // #58 r6: POST grace after exp (wallet-approval/mining latency). Replay
+      // of one tx is still blocked by the duplicate-txHash 409.
+      describe("exp grace (EXP_POST_GRACE_SEC)", () => {
+        const T0 = Date.UTC(2030, 0, 1);
+        const t0 = Math.floor(T0 / 1000);
+        const expAt = String(t0 + 60);
+        afterEach(() => {
+          vi.useRealTimers();
+        });
+        const signedAtT0 = () => {
+          vi.useFakeTimers({ toFake: ["Date"] });
+          vi.setSystemTime(T0);
+          return buildSignedCheckoutBody({ ...signedParams(), exp: expAt });
+        };
+
+        it("EXP_POST_GRACE_SEC is 900", async () => {
+          const { EXP_POST_GRACE_SEC } = await import("../src/intent.js");
+          expect(EXP_POST_GRACE_SEC).toBe(900);
+        });
+
+        it("accepts a signed POST at exp+600", async () => {
+          const checkout = signedAtT0();
+          vi.setSystemTime((Number(expAt) + 600) * 1000);
+          mockTransfer();
+          const res = await post(bodyFor(checkout));
+          expect(res.status).toBe(200);
+          expect((await res.json()).payment.status).toBe("verified");
+        });
+
+        it("rejects a signed POST at exp+901 (401, never verifies on-chain)", async () => {
+          const checkout = signedAtT0();
+          vi.setSystemTime((Number(expAt) + 901) * 1000);
+          const res = await post(bodyFor(checkout));
+          expect(res.status).toBe(401);
+          expect((await res.json()).error).toBe("Authentication required");
+          expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+        });
+
+        it("grace does not relax the HMAC: tampered field at exp+600 is 401", async () => {
+          const checkout = signedAtT0();
+          vi.setSystemTime((Number(expAt) + 600) * 1000);
+          const res = await post(bodyFor(checkout, { plan: "max" }));
+          expect(res.status).toBe(401);
+          expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+        });
+
+        it("grace does not allow replay: same txHash at exp+600 after settlement is 409", async () => {
+          const checkout = signedAtT0();
+          vi.setSystemTime((Number(expAt) + 600) * 1000);
+          mockTransfer();
+          const first = await post(bodyFor(checkout, { txHash: "0xgrace_replay_tx" }));
+          expect(first.status).toBe(200);
+          const again = await post(bodyFor(checkout, { txHash: "0xgrace_replay_tx" }));
+          expect(again.status).toBe(409);
+          expect((await again.json()).error).toBe("Transaction already submitted");
+        });
+      });
+
+      it("rejects a signed intent submitted with idType \"email\" (401)", async () => {
+        const checkout = buildSignedCheckoutBody(signedParams());
+        const res = await post(bodyFor(checkout, { idType: "email", initData: undefined }));
+        expect(res.status).toBe(401);
+        expect((await res.json()).error).toBe("Authentication required");
+        expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+      });
+
+      it("legacy initData-only POST drops unsigned placement fields from metadata and callback", async () => {
+        const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
+          fetchCalls.push({ url: String(url), init: init ?? {} });
+          return new Response("OK", { status: 200 });
+        }) as unknown as typeof fetch;
+        try {
+          mockTransfer();
+          const res = await post({
+            txHash: "0xlegacy_placement_tx",
+            chainId: "base",
+            token: "usdc",
+            idType: "tg",
+            uid: "42",
+            plan: "starter",
+            callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
+            initData: buildInitData(42),
+            tenantType: "team",
+            vmProvider: "azure",
+            hostType: "bare-metal",
+            deploymentType: "hermes",
+          });
+          expect(res.status).toBe(200);
+          const payment = (await res.json()).payment;
+          expect(payment.status).toBe("verified");
+          for (const field of ["tenantType", "vmProvider", "hostType", "deploymentType"]) {
+            expect(payment.metadata ?? {}, field).not.toHaveProperty(field);
+          }
+          expect(payment.metadata?.checkoutIntentVerified).toBe(false);
+
+          await new Promise((r) => setTimeout(r, 100));
+          const cb = fetchCalls.find((c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook" && String(c.init.body).includes("0xlegacy_placement_tx"));
+          expect(cb).toBeDefined();
+          const cbPayment = JSON.parse(cb!.init.body as string).payment;
+          for (const field of ["tenantType", "vmProvider", "hostType", "deploymentType"]) {
+            expect(cbPayment, field).not.toHaveProperty(field);
+          }
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+
+      it("signed POST keeps placement fields in metadata and callback", async () => {
+        const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
+          fetchCalls.push({ url: String(url), init: init ?? {} });
+          return new Response("OK", { status: 200 });
+        }) as unknown as typeof fetch;
+        try {
+          mockTransfer();
+          const checkout = buildSignedCheckoutBody({
+            ...signedParams(),
+            callback: "https://admin.openclaw.vibebrowser.app/webhook",
+          });
+          const res = await post(bodyFor(checkout, { callbackUrl: checkout.callback, txHash: "0xsigned_placement_tx" }));
+          expect(res.status).toBe(200);
+          const payment = (await res.json()).payment;
+          expect(payment.status).toBe("verified");
+          expect(payment.metadata).toMatchObject({
+            tenantType: "personal",
+            vmProvider: "lxd",
+            hostType: "vps",
+            deploymentType: "hermes",
+            checkoutIntentVerified: true,
+          });
+
+          await new Promise((r) => setTimeout(r, 100));
+          const cb = fetchCalls.find((c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook" && String(c.init.body).includes("0xsigned_placement_tx"));
+          expect(cb).toBeDefined();
+          expect(JSON.parse(cb!.init.body as string).payment).toMatchObject({
+            tenantType: "personal",
+            vmProvider: "lxd",
+            hostType: "vps",
+            deploymentType: "hermes",
+          });
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+
+      it("rejects sig:\"\" with valid initData (401, never downgraded to unsigned)", async () => {
+        const checkout = buildSignedCheckoutBody(signedParams());
+        const res = await post(bodyFor(checkout, { sig: "" }));
+        expect(res.status).toBe(401);
+        expect((await res.json()).error).toBe("Authentication required");
+        expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+      });
+
+      it("still accepts legacy initData-only requests (no sig)", async () => {
+        mockTransfer();
+        const res = await post({
+          txHash: "0xsigned_initdata_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          initData: buildInitData(42),
+        });
+        expect(res.status).toBe(200);
+        expect((await res.json()).payment.status).toBe("verified");
+      });
     });
 
     it("stores topup_id when topup param is provided", async () => {
@@ -1234,6 +1615,59 @@ describe("Server API", () => {
       expect(body.payment.uid).toBe("42");
       expect(body.payment.idType).toBe("tg");
       expect(body.timestamp).toBeDefined();
+    });
+
+    // Regression (#58 r5): the apiKey is the operator's server-to-server
+    // secret, so apiKey-only auth (no sig, no initData) is privileged and its
+    // placement/runtime fields must reach the verification context and the
+    // callback. Only unsigned Telegram initData-only auth strips them.
+    it("apiKey-only (no sig) keeps vmProvider=lxd + deploymentType=hermes in metadata and callback", async () => {
+      const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+      globalThis.fetch = vi.fn(async (url: any, init?: any) => {
+        fetchCalls.push({ url: String(url), init });
+        return new Response("OK", { status: 200 });
+      }) as any;
+
+      mockedVerifyTransfer.mockResolvedValueOnce({
+        from: "0xSender",
+        to: "0xTestBaseWallet",
+        amountRaw: "10000000",
+        amountUsd: 10,
+        token: "usdc",
+        blockNumber: 12346,
+        txHash: "0xapikey_placement_tx",
+      });
+
+      const res = await app.request("/api/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          txHash: "0xapikey_placement_tx",
+          chainId: "base",
+          token: "usdc",
+          idType: "tg",
+          uid: "42",
+          plan: "starter",
+          apiKey: "test-api-key",
+          callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
+          vmProvider: "lxd",
+          deploymentType: "hermes",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const payment = (await res.json()).payment;
+      expect(payment.status).toBe("verified");
+      expect(payment.metadata).toMatchObject({ vmProvider: "lxd", deploymentType: "hermes" });
+
+      await new Promise((r) => setTimeout(r, 100));
+      const cb = fetchCalls.find(
+        (c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook" && String(c.init.body).includes("0xapikey_placement_tx"),
+      );
+      expect(cb).toBeDefined();
+      const cbPayment = JSON.parse(cb!.init.body as string).payment;
+      expect(cbPayment.vmProvider).toBe("lxd");
+      expect(cbPayment.deploymentType).toBe("hermes");
     });
 
     it("includes topup field in callback payload when topup is set", async () => {
