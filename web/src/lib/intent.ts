@@ -75,25 +75,75 @@ export function buildPaymentBodyFromIntent(params: URLSearchParams): IntentBody 
 }
 
 /**
+ * Raw canonical string of a signed URL: sorted `key=value` lines (joined by
+ * "\n") over every present signed key and alias (excluding `sig`), values
+ * exactly as given, duplicates included. This is what the signer HMACs, so a
+ * signed URL is only usable if it equals
+ * canonicalIntentString(buildPaymentBodyFromIntent(params)).
+ */
+export function rawIntentCanonicalString(params: URLSearchParams): string {
+  const signedKeys = new Set<string>([...INTENT_PARAM_KEYS, ...Object.keys(INTENT_PARAM_ALIASES)]);
+  return [...params.entries()]
+    .filter(([key]) => signedKeys.has(key))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+}
+
+/**
  * Signed URL keys that make a signed link unusable, checked BEFORE any
  * on-chain transfer. Returns:
  *   - every signed key (INTENT_PARAM_KEYS plus aliases) present with an empty
  *     value. The signer never emits these and the server would compute a
  *     different canonical string (it omits empty optionals), so the payment
  *     would 401 after the money moved;
- *   - "idtype" when `sig` is present and idtype is not exactly "tg" (signed
- *     intents are Telegram-only; the server rejects anything else).
+ * and, only when `sig` is present:
+ *   - "sig" when sig is empty (a signed claim that can never verify);
+ *   - any signed key, alias or `sig` that appears more than once;
+ *   - "idtype" when idtype is not exactly "tg" (signed intents are
+ *     Telegram-only; the server rejects anything else);
+ *   - "exp" when exp is missing, not an integer, or <= nowSec (expired);
+ *   - "tenant" when tenant is present without tenantType or with a different
+ *     value (the body has a single tenantType field, so it cannot round-trip);
+ *   - the legacy alias "vmProvider" (signer emits `vmp`; the alias cannot
+ *     round-trip through the canonical string);
+ *   - "canonical" when none of the above fired but the raw URL canonical
+ *     string still differs from the one rebuilt from the payment body. This
+ *     closes the whole class of non-round-trippable shapes.
  * Empty result means the link is structurally valid (the HMAC itself is
  * checked server-side).
  */
-export function findInvalidSignedIntentParams(params: URLSearchParams): string[] {
+export function findInvalidSignedIntentParams(
+  params: URLSearchParams,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): string[] {
   const invalid: string[] = [];
-  const signedKeys: string[] = [...INTENT_PARAM_KEYS, ...Object.keys(INTENT_PARAM_ALIASES)];
+  const add = (key: string) => {
+    if (!invalid.includes(key)) invalid.push(key);
+  };
+  const aliasKeys = Object.keys(INTENT_PARAM_ALIASES);
+  const signedKeys: string[] = [...INTENT_PARAM_KEYS, ...aliasKeys];
   for (const key of signedKeys) {
-    if (params.has(key) && params.getAll(key).some((v) => v === "")) invalid.push(key);
+    if (params.has(key) && params.getAll(key).some((v) => v === "")) add(key);
   }
-  if (params.has("sig") && params.get("idtype") !== "tg" && !invalid.includes("idtype")) {
-    invalid.push("idtype");
+  if (!params.has("sig")) return invalid;
+
+  if (params.getAll("sig").some((v) => v === "")) add("sig");
+  for (const key of [...signedKeys, "sig"]) {
+    if (params.getAll(key).length > 1) add(key);
+  }
+  if (params.get("idtype") !== "tg") add("idtype");
+  const exp = params.get("exp");
+  if (exp === null || !/^\d+$/.test(exp) || Number(exp) <= nowSec) add("exp");
+  if (params.has("tenant") && params.get("tenant") !== params.get("tenantType")) add("tenant");
+  for (const alias of aliasKeys) {
+    if (params.has(alias)) add(alias);
+  }
+  if (
+    invalid.length === 0 &&
+    rawIntentCanonicalString(params) !== canonicalIntentString(buildPaymentBodyFromIntent(params))
+  ) {
+    add("canonical");
   }
   return invalid;
 }

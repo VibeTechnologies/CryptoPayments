@@ -342,6 +342,16 @@ export function createApp(injectedDb?: DB) {
       return c.json({ error: "Authentication required" }, 401);
     }
 
+    // Placement/runtime fields are only trusted when covered by a verified
+    // checkout-intent HMAC. Unsigned (initData-only / apiKey) payments must not
+    // be able to inject them into the verification context or webhook.
+    if (!checkoutIntentVerified) {
+      delete body.tenantType;
+      delete body.vmProvider;
+      delete body.hostType;
+      delete body.deploymentType;
+    }
+
     // ── Validate inputs ──
     if (!body.txHash || typeof body.txHash !== "string") {
       return c.json({ error: "txHash is required" }, 400);

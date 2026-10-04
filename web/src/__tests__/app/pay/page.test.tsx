@@ -359,6 +359,31 @@ describe("PayPage", () => {
     });
   });
 
+  it("unsigned link forwards no placement/runtime fields", async () => {
+    const user = userEvent.setup();
+    setUrlParams({
+      uid: "12345",
+      plan: "max",
+      idtype: "tg",
+      tenantType: "team",
+      tenant: "team",
+      vmp: "lxd",
+      hostType: "vps",
+      deploymentType: "hermes",
+    });
+    vi.mocked(submitPayment).mockResolvedValue({ payment: { status: "verified", id: "p1" } } as any);
+
+    render(<PayPage />);
+    await waitFor(() => expect(screen.getByTestId("mock-tx-sent")).toBeInTheDocument());
+    await user.click(screen.getByTestId("mock-tx-sent"));
+
+    await waitFor(() => expect(submitPayment).toHaveBeenCalled());
+    const sent = vi.mocked(submitPayment).mock.calls[0][0] as unknown as Record<string, unknown>;
+    for (const field of ["tenantType", "vmProvider", "hostType", "deploymentType", "sig"]) {
+      expect(sent, field).not.toHaveProperty(field);
+    }
+  });
+
   it("omits deploymentType when the intent does not carry one (legacy openclaw)", async () => {
     const user = userEvent.setup();
     setUrlParams({ uid: "12345", plan: "max", idtype: "tg" });

@@ -10,6 +10,36 @@ import {
 
 const INVALID_SIGNED_LINK_MESSAGE =
   "This payment link is invalid or was modified. Request a new link.";
+const EXPIRED_SIGNED_LINK_MESSAGE =
+  "This payment link has expired. Request a new link.";
+const SIGNED_UID_MISMATCH_MESSAGE =
+  "This payment link was issued for a different Telegram account. Open it from the account that requested it.";
+
+/** Placement/runtime fields: only trusted (and forwarded) under a signature. */
+const SIGNED_ONLY_BODY_FIELDS = ["tenantType", "vmProvider", "hostType", "deploymentType"] as const;
+
+/**
+ * Pre-send guard for a signed link. Returns the user-facing error, or null
+ * when the link may be paid. Runs at mount AND right before the wallet
+ * transfer (exp may lapse while the page is open).
+ */
+function signedLinkError(
+  params: URLSearchParams,
+  telegramUserId: string | null,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): string | null {
+  if (!params.has("sig")) return null;
+  const invalid = findInvalidSignedIntentParams(params, nowSec);
+  if (invalid.length === 1 && invalid[0] === "exp" && params.get("exp")) {
+    const exp = params.get("exp")!;
+    if (/^\d+$/.test(exp)) return EXPIRED_SIGNED_LINK_MESSAGE;
+  }
+  if (invalid.length > 0) return INVALID_SIGNED_LINK_MESSAGE;
+  if (telegramUserId !== null && telegramUserId !== params.get("uid")) {
+    return SIGNED_UID_MISMATCH_MESSAGE;
+  }
+  return null;
+}
 import {
   type AppConfig,
   type ChainId,
@@ -65,6 +95,9 @@ export default function PayPage() {
   // A signed link that can never verify (non-tg idtype, empty signed key).
   // Payment is blocked BEFORE any on-chain transfer.
   const [invalidSignedLink, setInvalidSignedLink] = useState(false);
+  // URL params + Telegram user id captured at mount, re-checked pre-send.
+  const [urlParams, setUrlParams] = useState<URLSearchParams>(() => new URLSearchParams());
+  const [telegramUserId, setTelegramUserId] = useState<string | null>(null);
   const [initData, setInitData] = useState("");
   const [userName, setUserName] = useState("");
 
@@ -95,7 +128,7 @@ export default function PayPage() {
     const pCallback = params.get("callback") || "";
     const pIntent = buildPaymentBodyFromIntent(params);
     const isSigned = params.has("sig");
-    const pInvalidSigned = isSigned && findInvalidSignedIntentParams(params).length > 0;
+    let pTelegramUserId: string | null = null;
     let pName = "";
 
     if (tg) {
@@ -104,6 +137,7 @@ export default function PayPage() {
       setInitData(tg.initData || "");
       if (tg.initDataUnsafe?.user) {
         const user = tg.initDataUnsafe.user;
+        pTelegramUserId = String(user.id);
         if (!pUid) pUid = String(user.id);
         // A signed idtype is authoritative and must never be overwritten
         // (laundering idtype=email into "tg" would bypass the fail-closed check).
@@ -129,8 +163,11 @@ export default function PayPage() {
     setIdType(pIdType);
     setCallbackUrl(pCallback);
     setIntentBody(pIntent);
-    setInvalidSignedLink(pInvalidSigned);
-    if (pInvalidSigned) setStatus({ type: "error", message: INVALID_SIGNED_LINK_MESSAGE });
+    setUrlParams(params);
+    setTelegramUserId(pTelegramUserId);
+    const pSignedError = signedLinkError(params, pTelegramUserId);
+    setInvalidSignedLink(pSignedError !== null);
+    if (pSignedError) setStatus({ type: "error", message: pSignedError });
     setUserName(pName || (pIdType === "tg" ? `User ${pUid}` : pUid));
 
     // Fetch config
@@ -203,6 +240,25 @@ export default function PayPage() {
     });
   }
 
+  /**
+   * Called by WalletConnect immediately before it initiates the on-chain
+   * transfer. Re-runs the signed-link guard (exp can lapse while the page is
+   * open). Returning false aborts the send.
+   */
+  const beforeSend = useCallback((): boolean => {
+    if (invalidSignedLink) {
+      setStatus({ type: "error", message: INVALID_SIGNED_LINK_MESSAGE });
+      return false;
+    }
+    const err = signedLinkError(urlParams, telegramUserId);
+    if (err) {
+      setInvalidSignedLink(true);
+      setStatus({ type: "error", message: err });
+      return false;
+    }
+    return true;
+  }, [invalidSignedLink, urlParams, telegramUserId]);
+
   // Handle wallet transaction completion
   const handleTxSent = useCallback(
     async (hash: string) => {
@@ -227,10 +283,13 @@ export default function PayPage() {
     setStatus({ type: "pending", message: "Verifying transaction on-chain..." });
 
     try {
-      // Signed link: every signed field, idType included, is sent verbatim
-      // from the URL. Unsigned (legacy) link: the page's own idType wins.
+      // Signed link (non-empty sig): every signed field, idType included, is
+      // sent verbatim from the URL. Unsigned (legacy) link: the page's own
+      // idType wins and placement/runtime fields are NOT forwarded (they are
+      // only trusted under a signature).
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { idType: _urlIdType, ...unsignedIntentFields } = intentBody;
+      for (const field of SIGNED_ONLY_BODY_FIELDS) delete unsignedIntentFields[field];
       const intentFields = intentBody.sig ? intentBody : unsignedIntentFields;
       const result = await submitPayment({
         txHash: hash.trim(),
@@ -367,6 +426,7 @@ export default function PayPage() {
               walletAddress={walletAddress}
               amount={price}
               onTxSent={handleTxSent}
+              beforeSend={beforeSend}
               disabled={verified || submitting || isUnknownTopup || invalidSignedLink}
               onStatus={(type, msg) => setStatus({ type, message: msg })}
             />

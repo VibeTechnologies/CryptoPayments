@@ -7,6 +7,7 @@ import {
   INTENT_PARAM_TO_BODY_FIELD,
   buildPaymentBodyFromIntent,
   canonicalIntentString,
+  rawIntentCanonicalString,
 } from "../src/intent.ts";
 
 // Every key the signer (OpenClawBot buildCryptoCheckoutUrl / AgentPod) emits.
@@ -180,5 +181,139 @@ describe("findInvalidSignedIntentParams", () => {
   it("does not flag idtype=email on an unsigned link", () => {
     const { sig: _omit, ...rest } = base;
     expect(findInvalidSignedIntentParams(new URLSearchParams({ ...rest, idtype: "email" }))).toEqual([]);
+  });
+});
+
+describe("findInvalidSignedIntentParams: pre-send sig/exp guard", () => {
+  const NOW = 1_700_000_000;
+  const base = { uid: "7", idtype: "tg", exp: String(NOW + 600), plan: "starter", sig: "abc" };
+
+  it("reports sig present but empty", () => {
+    expect(findInvalidSignedIntentParams(new URLSearchParams({ ...base, sig: "" }), NOW)).toContain("sig");
+  });
+
+  it("reports missing exp on a signed link", () => {
+    const { exp: _omit, ...rest } = base;
+    expect(findInvalidSignedIntentParams(new URLSearchParams(rest), NOW)).toContain("exp");
+  });
+
+  it.each(["abc", "12.5", "1e10", "-5", " 1700000600"])("reports non-integer exp %j", (exp) => {
+    expect(findInvalidSignedIntentParams(new URLSearchParams({ ...base, exp }), NOW)).toContain("exp");
+  });
+
+  it("reports exp <= now (boundary and past)", () => {
+    expect(findInvalidSignedIntentParams(new URLSearchParams({ ...base, exp: String(NOW) }), NOW)).toEqual(["exp"]);
+    expect(findInvalidSignedIntentParams(new URLSearchParams({ ...base, exp: String(NOW - 1) }), NOW)).toEqual(["exp"]);
+  });
+
+  it("accepts exp in the future", () => {
+    expect(findInvalidSignedIntentParams(new URLSearchParams({ ...base, exp: String(NOW + 1) }), NOW)).toEqual([]);
+  });
+
+  it("defaults nowSec to the current time", () => {
+    const past = String(Math.floor(Date.now() / 1000) - 1);
+    expect(findInvalidSignedIntentParams(new URLSearchParams({ ...base, exp: past }))).toEqual(["exp"]);
+  });
+
+  it("does not check exp on an unsigned link", () => {
+    const { sig: _s, exp: _e, ...rest } = base;
+    expect(findInvalidSignedIntentParams(new URLSearchParams(rest), NOW)).toEqual([]);
+  });
+});
+
+describe("findInvalidSignedIntentParams: non-round-trippable signed URL shapes", () => {
+  const NOW = 1_700_000_000;
+  function agentPodLxd(): URLSearchParams {
+    const p = new URLSearchParams();
+    p.set("plan", "max");
+    p.set("uid", "42");
+    p.set("idtype", "tg");
+    p.set("exp", String(NOW + 3600));
+    p.set("tenantType", "team");
+    p.set("tenant", "team");
+    p.set("vmp", "lxd");
+    p.set("hostType", "vps");
+    p.set("deploymentType", "hermes");
+    p.set("callback", "https://agentpod.example/cb?x=1");
+    p.set("sig", "deadbeef");
+    return p;
+  }
+
+  it("normal AgentPod LXD shape is valid and raw canonical == body canonical", () => {
+    const params = agentPodLxd();
+    expect(findInvalidSignedIntentParams(params, NOW)).toEqual([]);
+    expect(rawIntentCanonicalString(params)).toBe(canonicalIntentString(buildPaymentBodyFromIntent(params)));
+    expect(rawIntentCanonicalString(params)).toBe(canonicalFromUrl(params));
+  });
+
+  it.each([...SIGNED_URL_KEYS, "vmProvider"])("rejects duplicated signed key %s", (key) => {
+    const params = agentPodLxd();
+    const value = params.get(key) ?? "dup";
+    params.append(key, value);
+    if (params.getAll(key).length < 2) params.append(key, value);
+    expect(findInvalidSignedIntentParams(params, NOW)).toContain(key);
+  });
+
+  it("rejects duplicated sig", () => {
+    const params = agentPodLxd();
+    params.append("sig", "deadbeef");
+    expect(findInvalidSignedIntentParams(params, NOW)).toContain("sig");
+  });
+
+  it("rejects tenant without tenantType", () => {
+    const params = agentPodLxd();
+    params.delete("tenantType");
+    expect(findInvalidSignedIntentParams(params, NOW)).toContain("tenant");
+    expect(rawIntentCanonicalString(params)).not.toBe(canonicalIntentString(buildPaymentBodyFromIntent(params)));
+  });
+
+  it("rejects tenant and tenantType with different values", () => {
+    const params = agentPodLxd();
+    params.set("tenant", "personal");
+    expect(findInvalidSignedIntentParams(params, NOW)).toContain("tenant");
+    expect(rawIntentCanonicalString(params)).not.toBe(canonicalIntentString(buildPaymentBodyFromIntent(params)));
+  });
+
+  it("generic check rejects tenantType without its tenant mirror (body canonical emits both)", () => {
+    const params = agentPodLxd();
+    params.delete("tenant");
+    expect(rawIntentCanonicalString(params)).not.toBe(canonicalIntentString(buildPaymentBodyFromIntent(params)));
+    expect(findInvalidSignedIntentParams(params, NOW)).toEqual(["canonical"]);
+  });
+
+  it("rejects the legacy vmProvider alias on a signed URL", () => {
+    const params = agentPodLxd();
+    params.delete("vmp");
+    params.set("vmProvider", "lxd");
+    expect(findInvalidSignedIntentParams(params, NOW)).toContain("vmProvider");
+    expect(rawIntentCanonicalString(params)).not.toBe(canonicalIntentString(buildPaymentBodyFromIntent(params)));
+  });
+
+  it("still accepts the vmProvider alias on an unsigned URL", () => {
+    expect(findInvalidSignedIntentParams(new URLSearchParams({ uid: "1", vmProvider: "lxd" }), NOW)).toEqual([]);
+  });
+
+  it("generic: every listed bad shape has raw canonical != body canonical, every flagged link is non-empty", () => {
+    const shapes: Array<(p: URLSearchParams) => void> = [
+      (p) => p.append("vmp", "lxd"),
+      (p) => p.delete("tenantType"),
+      (p) => p.set("tenant", "other"),
+      (p) => { p.delete("vmp"); p.set("vmProvider", "lxd"); },
+    ];
+    for (const mutate of shapes) {
+      const params = agentPodLxd();
+      mutate(params);
+      expect(rawIntentCanonicalString(params)).not.toBe(canonicalIntentString(buildPaymentBodyFromIntent(params)));
+      expect(findInvalidSignedIntentParams(params, NOW).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("rawIntentCanonicalString ignores sig and non-signed keys", () => {
+    const params = agentPodLxd();
+    const before = rawIntentCanonicalString(params);
+    params.set("test", "true");
+    params.set("sig", "other");
+    expect(rawIntentCanonicalString(params)).toBe(before);
+    expect(before).not.toContain("sig=");
   });
 });

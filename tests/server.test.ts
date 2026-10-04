@@ -251,6 +251,17 @@ function buildSignedCheckoutBody(params: Record<string, string>): Record<string,
   };
 }
 
+/**
+ * exp + sig for a checkout intent carrying team/hetzner/vps placement plus the
+ * given signed keys. Spread into an /api/payment body that already carries the
+ * matching plain fields (tenantType/vmProvider/hostType/...).
+ */
+function signedPlacement(extra: Record<string, string>): { exp: string; sig: string } {
+  const exp = String(Math.floor(Date.now() / 1000) + 600);
+  const params = { ...extra, idtype: "tg", exp, tenantType: "team", tenant: "team", vmp: "hetzner", hostType: "vps" };
+  return { exp, sig: signCheckoutIntent(params) };
+}
+
 describe("Server API", () => {
   let app: ReturnType<typeof createApp>;
   let mockDb: DB;
@@ -1114,6 +1125,96 @@ describe("Server API", () => {
         expect(mockedVerifyTransfer).not.toHaveBeenCalled();
       });
 
+      it("legacy initData-only POST drops unsigned placement fields from metadata and callback", async () => {
+        const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
+          fetchCalls.push({ url: String(url), init: init ?? {} });
+          return new Response("OK", { status: 200 });
+        }) as unknown as typeof fetch;
+        try {
+          mockTransfer();
+          const res = await post({
+            txHash: "0xlegacy_placement_tx",
+            chainId: "base",
+            token: "usdc",
+            idType: "tg",
+            uid: "42",
+            plan: "starter",
+            callbackUrl: "https://admin.openclaw.vibebrowser.app/webhook",
+            initData: buildInitData(42),
+            tenantType: "team",
+            vmProvider: "azure",
+            hostType: "bare-metal",
+            deploymentType: "hermes",
+          });
+          expect(res.status).toBe(200);
+          const payment = (await res.json()).payment;
+          expect(payment.status).toBe("verified");
+          for (const field of ["tenantType", "vmProvider", "hostType", "deploymentType"]) {
+            expect(payment.metadata ?? {}, field).not.toHaveProperty(field);
+          }
+          expect(payment.metadata?.checkoutIntentVerified).toBe(false);
+
+          await new Promise((r) => setTimeout(r, 100));
+          const cb = fetchCalls.find((c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook" && String(c.init.body).includes("0xlegacy_placement_tx"));
+          expect(cb).toBeDefined();
+          const cbPayment = JSON.parse(cb!.init.body as string).payment;
+          for (const field of ["tenantType", "vmProvider", "hostType", "deploymentType"]) {
+            expect(cbPayment, field).not.toHaveProperty(field);
+          }
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+
+      it("signed POST keeps placement fields in metadata and callback", async () => {
+        const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
+          fetchCalls.push({ url: String(url), init: init ?? {} });
+          return new Response("OK", { status: 200 });
+        }) as unknown as typeof fetch;
+        try {
+          mockTransfer();
+          const checkout = buildSignedCheckoutBody({
+            ...signedParams(),
+            callback: "https://admin.openclaw.vibebrowser.app/webhook",
+          });
+          const res = await post(bodyFor(checkout, { callbackUrl: checkout.callback, txHash: "0xsigned_placement_tx" }));
+          expect(res.status).toBe(200);
+          const payment = (await res.json()).payment;
+          expect(payment.status).toBe("verified");
+          expect(payment.metadata).toMatchObject({
+            tenantType: "personal",
+            vmProvider: "lxd",
+            hostType: "vps",
+            deploymentType: "hermes",
+            checkoutIntentVerified: true,
+          });
+
+          await new Promise((r) => setTimeout(r, 100));
+          const cb = fetchCalls.find((c) => c.url === "https://admin.openclaw.vibebrowser.app/webhook" && String(c.init.body).includes("0xsigned_placement_tx"));
+          expect(cb).toBeDefined();
+          expect(JSON.parse(cb!.init.body as string).payment).toMatchObject({
+            tenantType: "personal",
+            vmProvider: "lxd",
+            hostType: "vps",
+            deploymentType: "hermes",
+          });
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+
+      it("rejects sig:\"\" with valid initData (401, never downgraded to unsigned)", async () => {
+        const checkout = buildSignedCheckoutBody(signedParams());
+        const res = await post(bodyFor(checkout, { sig: "" }));
+        expect(res.status).toBe(401);
+        expect((await res.json()).error).toBe("Authentication required");
+        expect(mockedVerifyTransfer).not.toHaveBeenCalled();
+      });
+
       it("still accepts legacy initData-only requests (no sig)", async () => {
         mockTransfer();
         const res = await post({
@@ -1426,6 +1527,13 @@ describe("Server API", () => {
           tenantType: "team",
           vmProvider: "hetzner",
           hostType: "vps",
+          // Placement fields are only trusted under a verified checkout intent.
+          ...signedPlacement({
+            plan: "starter",
+            topup: "medium",
+            uid: "42",
+            callback: "https://admin.openclaw.vibebrowser.app/webhook",
+          }),
         }),
       });
 
@@ -1706,6 +1814,12 @@ describe("Server API", () => {
           tenantType: "team",
           vmProvider: "hetzner",
           hostType: "vps",
+          // Placement fields are only trusted under a verified checkout intent.
+          ...signedPlacement({
+            plan: "starter",
+            uid: "77",
+            callback: "https://admin.openclaw.vibebrowser.app/webhook",
+          }),
         }),
       });
       expect(postRes.status).toBe(202);
