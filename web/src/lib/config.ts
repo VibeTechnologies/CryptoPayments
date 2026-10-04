@@ -20,7 +20,8 @@ export interface PaymentRequest {
   txHash: string;
   chainId: ChainId;
   token: TokenId;
-  idType: "tg" | "email";
+  /** Signed intents forward the URL's idtype verbatim, so this is not narrowed. */
+  idType: string;
   uid: string;
   plan?: string;
   topup?: string;

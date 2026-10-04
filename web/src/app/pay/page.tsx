@@ -2,7 +2,14 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { fetchConfig, submitPayment, checkPaymentStatus } from "@/lib/api";
-import { buildPaymentBodyFromIntent, type IntentBody } from "@/lib/intent";
+import {
+  buildPaymentBodyFromIntent,
+  findInvalidSignedIntentParams,
+  type IntentBody,
+} from "@/lib/intent";
+
+const INVALID_SIGNED_LINK_MESSAGE =
+  "This payment link is invalid or was modified. Request a new link.";
 import {
   type AppConfig,
   type ChainId,
@@ -55,6 +62,9 @@ export default function PayPage() {
   // Signed checkout-intent params, forwarded VERBATIM to /api/payment.
   // Never validate/normalise/default these client-side: the HMAC covers them.
   const [intentBody, setIntentBody] = useState<IntentBody>({});
+  // A signed link that can never verify (non-tg idtype, empty signed key).
+  // Payment is blocked BEFORE any on-chain transfer.
+  const [invalidSignedLink, setInvalidSignedLink] = useState(false);
   const [initData, setInitData] = useState("");
   const [userName, setUserName] = useState("");
 
@@ -84,6 +94,8 @@ export default function PayPage() {
     let pIdType = (params.get("idtype") || "tg") as "tg" | "email";
     const pCallback = params.get("callback") || "";
     const pIntent = buildPaymentBodyFromIntent(params);
+    const isSigned = params.has("sig");
+    const pInvalidSigned = isSigned && findInvalidSignedIntentParams(params).length > 0;
     let pName = "";
 
     if (tg) {
@@ -93,7 +105,9 @@ export default function PayPage() {
       if (tg.initDataUnsafe?.user) {
         const user = tg.initDataUnsafe.user;
         if (!pUid) pUid = String(user.id);
-        pIdType = "tg";
+        // A signed idtype is authoritative and must never be overwritten
+        // (laundering idtype=email into "tg" would bypass the fail-closed check).
+        if (!isSigned) pIdType = "tg";
         pName = user.first_name || "";
       }
       // Parse start_param: "plan_uid"
@@ -115,6 +129,8 @@ export default function PayPage() {
     setIdType(pIdType);
     setCallbackUrl(pCallback);
     setIntentBody(pIntent);
+    setInvalidSignedLink(pInvalidSigned);
+    if (pInvalidSigned) setStatus({ type: "error", message: INVALID_SIGNED_LINK_MESSAGE });
     setUserName(pName || (pIdType === "tg" ? `User ${pUid}` : pUid));
 
     // Fetch config
@@ -190,11 +206,15 @@ export default function PayPage() {
   // Handle wallet transaction completion
   const handleTxSent = useCallback(
     async (hash: string) => {
+      if (invalidSignedLink) {
+        setStatus({ type: "error", message: INVALID_SIGNED_LINK_MESSAGE });
+        return;
+      }
       setStatus({ type: "pending", message: "Transaction sent. Verifying on-chain..." });
       await doSubmit(hash);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedChain, selectedToken, idType, uid, plan, topup, callbackUrl, initData, intentBody],
+    [selectedChain, selectedToken, idType, uid, plan, topup, callbackUrl, initData, intentBody, invalidSignedLink],
   );
 
   // Submit payment for verification
@@ -207,10 +227,11 @@ export default function PayPage() {
     setStatus({ type: "pending", message: "Verifying transaction on-chain..." });
 
     try {
-      // Signed idtype is always "tg" (server enforces it); the page's own
-      // idType state, parsed from the same URL param, is what we submit.
+      // Signed link: every signed field, idType included, is sent verbatim
+      // from the URL. Unsigned (legacy) link: the page's own idType wins.
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { idType: _signedIdType, ...signedIntentFields } = intentBody;
+      const { idType: _urlIdType, ...unsignedIntentFields } = intentBody;
+      const intentFields = intentBody.sig ? intentBody : unsignedIntentFields;
       const result = await submitPayment({
         txHash: hash.trim(),
         chainId: selectedChain,
@@ -221,8 +242,9 @@ export default function PayPage() {
         topup: topup || undefined,
         callbackUrl: callbackUrl || undefined,
         initData: initData || undefined,
-        // Signed intent params last so they are byte-identical to the URL.
-        ...signedIntentFields,
+        // Signed intent params last so they are byte-identical to the URL and
+        // override display/auth state (never laundered by Telegram initData).
+        ...intentFields,
       });
 
       if (result.payment && result.payment.status !== "verified") {
@@ -345,7 +367,7 @@ export default function PayPage() {
               walletAddress={walletAddress}
               amount={price}
               onTxSent={handleTxSent}
-              disabled={verified || submitting || isUnknownTopup}
+              disabled={verified || submitting || isUnknownTopup || invalidSignedLink}
               onStatus={(type, msg) => setStatus({ type, message: msg })}
             />
           </div>

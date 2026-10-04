@@ -34,12 +34,20 @@ vi.mock("@tonconnect/ui-react", () => ({
 
 // Mock WalletConnect so tests can trigger the tx-sent callback directly,
 // exercising PayPage's submit wiring without driving a real wallet.
+// The mock records its props so tests can assert the page disables payment.
+const walletConnectProps: Array<{ disabled?: boolean }> = [];
+function lastWalletConnectProps() {
+  return walletConnectProps[walletConnectProps.length - 1];
+}
 vi.mock("@/components/wallet-connect", () => ({
-  WalletConnect: ({ onTxSent }: { onTxSent: (hash: string) => void }) => (
-    <button data-testid="mock-tx-sent" onClick={() => onTxSent("0xdeadbeef")}>
-      mock send
-    </button>
-  ),
+  WalletConnect: (props: { onTxSent: (hash: string) => void; disabled?: boolean }) => {
+    walletConnectProps.push(props);
+    return (
+      <button data-testid="mock-tx-sent" onClick={() => props.onTxSent("0xdeadbeef")}>
+        mock send
+      </button>
+    );
+  },
 }));
 
 import { fetchConfig, submitPayment } from "@/lib/api";
@@ -82,6 +90,7 @@ function setUrlParams(params: Record<string, string>) {
 describe("PayPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    walletConnectProps.length = 0;
     // Default: user identified via URL params
     setUrlParams({ uid: "12345", plan: "starter", idtype: "tg" });
     vi.mocked(fetchConfig).mockResolvedValue(mockConfig as any);
@@ -287,6 +296,67 @@ describe("PayPage", () => {
       .map(([k, v]) => `${k}=${v}`)
       .join("\n");
     expect(canonicalIntentString(sent)).toBe(urlCanonical);
+  });
+
+  function mockTelegramUser() {
+    window.Telegram = {
+      WebApp: {
+        ready: vi.fn(),
+        expand: vi.fn(),
+        close: vi.fn(),
+        initData: "signed_tg_init_data",
+        initDataUnsafe: { user: { id: 12345, first_name: "Alice" } },
+      },
+    };
+  }
+
+  const INVALID_LINK = "This payment link is invalid or was modified. Request a new link.";
+
+  // A signed idtype=email must not be laundered into "tg" by Telegram
+  // initData; the page must fail closed BEFORE the on-chain transfer.
+  it("blocks a signed idtype=email link inside Telegram (no POST)", async () => {
+    const user = userEvent.setup();
+    setUrlParams({ uid: "12345", plan: "max", idtype: "email", amountUsd: "100.00", exp: "9999999999", sig: "abc123" });
+    mockTelegramUser();
+
+    render(<PayPage />);
+    await waitFor(() => expect(screen.getByText(INVALID_LINK)).toBeInTheDocument());
+    expect(lastWalletConnectProps().disabled).toBe(true);
+    await user.click(screen.getByTestId("mock-tx-sent"));
+    expect(submitPayment).not.toHaveBeenCalled();
+  });
+
+  it("blocks a signed link carrying an empty signed key (vmp=) (no POST)", async () => {
+    const user = userEvent.setup();
+    setUrlParams({ uid: "12345", plan: "max", idtype: "tg", vmp: "", amountUsd: "100.00", exp: "9999999999", sig: "abc123" });
+
+    render(<PayPage />);
+    await waitFor(() => expect(screen.getByText(INVALID_LINK)).toBeInTheDocument());
+    expect(lastWalletConnectProps().disabled).toBe(true);
+    await user.click(screen.getByTestId("mock-tx-sent"));
+    expect(submitPayment).not.toHaveBeenCalled();
+  });
+
+  it("sends signed idType tg and vmProvider lxd verbatim inside Telegram", async () => {
+    const user = userEvent.setup();
+    setUrlParams({ uid: "12345", plan: "max", idtype: "tg", vmp: "lxd", amountUsd: "105.00", exp: "9999999999", sig: "abc123" });
+    mockTelegramUser();
+    vi.mocked(submitPayment).mockResolvedValue({ payment: { status: "verified", id: "p1" } } as unknown as Awaited<ReturnType<typeof submitPayment>>);
+
+    render(<PayPage />);
+    await waitFor(() => expect(screen.getByTestId("mock-tx-sent")).toBeInTheDocument());
+    expect(screen.queryByText(INVALID_LINK)).not.toBeInTheDocument();
+    expect(lastWalletConnectProps().disabled).toBe(false);
+    await user.click(screen.getByTestId("mock-tx-sent"));
+
+    await waitFor(() => expect(submitPayment).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(submitPayment).mock.calls[0][0]).toMatchObject({
+      idType: "tg",
+      vmProvider: "lxd",
+      uid: "12345",
+      sig: "abc123",
+      initData: "signed_tg_init_data",
+    });
   });
 
   it("omits deploymentType when the intent does not carry one (legacy openclaw)", async () => {
