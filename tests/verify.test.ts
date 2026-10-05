@@ -97,6 +97,52 @@ describe("verifyEvmTransfer", () => {
     expect(clock.now()).toBe(900);
   });
 
+  it("forwards opts.clock to the getBlockNumber (confirmations) retry, then returns the verified transfer", async () => {
+    // Covers the SECOND withRpcFailover call in verifyEvmTransfer: the
+    // receipt fetch succeeds first try, but the block-number lookup hits a
+    // transient error once. The 300ms backoff must land on the injected
+    // virtual clock (proves opts.clock is forwarded to that call site).
+    const ourWallet = "0xOurWalletAddress000000000000000000000001";
+    const ourWalletPadded = "0x000000000000000000000000" + ourWallet.slice(2).toLowerCase();
+    mockGetTransactionReceipt.mockResolvedValue({
+      status: "success",
+      blockNumber: 99999n,
+      logs: [
+        {
+          address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC on Base
+          topics: [
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "0x0000000000000000000000001111111111111111111111111111111111111111",
+            ourWalletPadded,
+          ],
+          data: "0x0000000000000000000000000000000000000000000000000000000000989680",
+        },
+      ],
+    });
+    mockGetBlockNumber.mockReset();
+    mockGetBlockNumber
+      .mockRejectedValueOnce(new Error("ETIMEDOUT"))
+      .mockResolvedValueOnce(1_000_000n);
+
+    const config = makeConfig({ base: ourWallet });
+    const clock = fakeClock();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await verifyEvmTransfer("0xtxhash", "base", config, { clock });
+      expect(result).not.toBeNull();
+      expect(result).not.toBe("pending");
+      const r = result as Exclude<typeof result, null | "pending">;
+      expect(r.token).toBe("usdc");
+      expect(r.amountUsd).toBe(10);
+      expect(r.blockNumber).toBe(99999);
+      expect(mockGetTransactionReceipt).toHaveBeenCalledTimes(1);
+      expect(mockGetBlockNumber).toHaveBeenCalledTimes(2);
+      expect(clock.now()).toBe(300);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("returns null when no matching Transfer log", async () => {
     mockGetTransactionReceipt.mockResolvedValue({
       status: "success",
@@ -192,6 +238,7 @@ describe("verifyTonTransfer", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("returns null when transaction not found", async () => {
@@ -295,6 +342,7 @@ describe("verifySolTransfer", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("returns null for failed transaction", async () => {
@@ -500,13 +548,22 @@ describe("withRpcFailover", () => {
   });
 
   it("fetchWithRetry retries a transient 5xx on the same URL before succeeding", async () => {
-    const mockFetch = vi.mocked(fetch);
-    mockFetch.mockResolvedValueOnce(new Response("boom", { status: 503 }));
-    mockFetch.mockResolvedValueOnce(new Response("ok", { status: 200 }));
-    const clock = fakeClock();
-    const resp = await fetchWithRetry("https://ton.example/api", undefined, { clock });
-    expect(resp.status).toBe(200);
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // Self-contained: stub fetch here rather than relying on a sibling
+    // describe's leftover stub (fails when run in isolation with -t).
+    const mockFetch = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", mockFetch);
+    try {
+      mockFetch.mockResolvedValueOnce(new Response("boom", { status: 503 }));
+      mockFetch.mockResolvedValueOnce(new Response("ok", { status: 200 }));
+      const clock = fakeClock();
+      const resp = await fetchWithRetry("https://ton.example/api", undefined, { clock });
+      expect(resp.status).toBe(200);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockFetch.mock.calls.every((c) => c[0] === "https://ton.example/api")).toBe(true);
+      expect(clock.now()).toBe(300); // one in-endpoint backoff on the virtual clock
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
