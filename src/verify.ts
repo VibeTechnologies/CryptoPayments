@@ -90,9 +90,21 @@ function isTransientRpcError(err: unknown): boolean {
   );
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+/**
+ * Time/randomness source for the retry + sweep logic. Production uses
+ * `realClock`; tests inject a virtual clock so backoff never waits for real.
+ */
+export interface RetryClock {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+  random(): number;
 }
+
+export const realClock: RetryClock = {
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  random: () => Math.random(),
+};
 
 /**
  * Run `fn(url)` against each RPC endpoint in `rpcUrls`, in order. Within one
@@ -118,7 +130,7 @@ function sleep(ms: number): Promise<void> {
 export async function withRpcFailover<T>(
   rpcUrls: string[],
   fn: (url: string) => Promise<T>,
-  opts?: { totalBudgetMs?: number; chainId?: string },
+  opts?: { totalBudgetMs?: number; chainId?: string; clock?: RetryClock },
 ): Promise<T> {
   if (rpcUrls.length === 0) {
     throw new Error("No RPC endpoints configured");
@@ -126,7 +138,8 @@ export async function withRpcFailover<T>(
   const sweepEnabled = opts?.totalBudgetMs !== undefined;
   const totalBudgetMs = opts?.totalBudgetMs ?? RETRY_MAX_TOTAL_MS;
   const chainLabel = opts?.chainId ?? "unknown";
-  const start = Date.now();
+  const clock = opts?.clock ?? realClock;
+  const start = clock.now();
   let lastErr: unknown;
   let sweep = 0;
   for (;;) {
@@ -137,29 +150,29 @@ export async function withRpcFailover<T>(
         } catch (err) {
           lastErr = err;
           if (!isTransientRpcError(err)) throw err;
-          const elapsed = Date.now() - start;
+          const elapsed = clock.now() - start;
           if (elapsed >= totalBudgetMs) break;
           if (attempt < RETRY_ATTEMPTS_PER_ENDPOINT) {
             const delay = Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), totalBudgetMs - elapsed);
             console.log(
               `[RPC-RETRY] chain=${chainLabel} endpoint=${url} attempt=${attempt}/${RETRY_ATTEMPTS_PER_ENDPOINT} delayMs=${delay}`,
             );
-            await sleep(delay);
+            await clock.sleep(Math.max(0, delay));
           }
         }
       }
     }
     if (!sweepEnabled) break;
-    const elapsed = Date.now() - start;
+    const elapsed = clock.now() - start;
     if (elapsed >= totalBudgetMs) break;
     sweep++;
     const cap = Math.min(SWEEP_BASE_DELAY_MS * 2 ** (sweep - 1), SWEEP_MAX_DELAY_MS);
-    const delay = Math.random() * cap; // full jitter
+    const delay = clock.random() * cap; // full jitter
     if (elapsed + delay >= totalBudgetMs) break;
     console.log(
       `[RPC-SWEEP] chain=${chainLabel} sweep=${sweep} delayMs=${Math.round(delay)} elapsedMs=${elapsed} budgetMs=${totalBudgetMs}`,
     );
-    await sleep(delay);
+    await clock.sleep(Math.max(0, delay));
   }
   const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
   throw new TransientVerificationError(
@@ -178,7 +191,7 @@ export async function withRpcFailover<T>(
 export async function fetchWithRetry(
   url: string,
   init?: RequestInit,
-  opts?: { totalBudgetMs?: number; chainId?: string },
+  opts?: { totalBudgetMs?: number; chainId?: string; clock?: RetryClock },
 ): Promise<Response> {
   return withRpcFailover(
     [url],
@@ -214,7 +227,7 @@ export async function verifyEvmTransfer(
   txHash: string,
   chainId: "base" | "eth" | "arbitrum" | "base_sepolia" | "eth_sepolia",
   config: Config,
-  opts?: { totalBudgetMs?: number },
+  opts?: { totalBudgetMs?: number; clock?: RetryClock },
 ): Promise<VerifyResult> {
   const chain = chainId === "base_sepolia" ? baseSepolia
     : chainId === "eth_sepolia" ? sepolia
@@ -259,7 +272,7 @@ export async function verifyEvmTransfer(
         }
         return r;
       },
-      { totalBudgetMs: opts?.totalBudgetMs, chainId },
+      { totalBudgetMs: opts?.totalBudgetMs, chainId, clock: opts?.clock },
     );
   } catch (err) {
     if (err instanceof TransientVerificationError) throw err;
@@ -279,7 +292,7 @@ export async function verifyEvmTransfer(
   const currentBlock = await withRpcFailover(
     rpcUrls,
     (url) => clientFor(url).getBlockNumber(),
-    { totalBudgetMs: opts?.totalBudgetMs, chainId },
+    { totalBudgetMs: opts?.totalBudgetMs, chainId, clock: opts?.clock },
   );
   const confirmations = Number(currentBlock - receipt.blockNumber) + 1;
   if (confirmations < MIN_CONFIRMATIONS[chainId]) {
@@ -342,7 +355,7 @@ export async function verifyEvmTransfer(
 export async function verifyTonTransfer(
   txHash: string,
   config: Config,
-  opts?: { totalBudgetMs?: number },
+  opts?: { totalBudgetMs?: number; clock?: RetryClock },
 ): Promise<VerifiedTransfer | null> {
   // TON base64 addresses are case-sensitive — do NOT lowercase.
   const recipientWallet = config.wallets.ton.trim();
@@ -357,7 +370,7 @@ export async function verifyTonTransfer(
 
   const resp = await fetchWithRetry(url, {
     headers: { Accept: "application/json" },
-  }, { totalBudgetMs: opts?.totalBudgetMs, chainId: "ton" });
+  }, { totalBudgetMs: opts?.totalBudgetMs, chainId: "ton", clock: opts?.clock });
 
   if (!resp.ok) {
     throw new Error(`TON API error: ${resp.status} ${resp.statusText}`);
@@ -401,7 +414,7 @@ export async function verifyTonTransfer(
   const jettonUrl = `${apiBase}/jetton/transfers?transaction_hash=${encodeURIComponent(txHash)}&limit=10`;
   const jettonResp = await fetchWithRetry(jettonUrl, {
     headers: { Accept: "application/json" },
-  }, { totalBudgetMs: opts?.totalBudgetMs, chainId: "ton" });
+  }, { totalBudgetMs: opts?.totalBudgetMs, chainId: "ton", clock: opts?.clock });
 
   if (!jettonResp.ok) {
     // Throw loudly so callers know the result is indeterminate, not "not found".
@@ -464,7 +477,7 @@ export async function verifyTonTransfer(
 export async function verifySolTransfer(
   txHash: string,
   config: Config,
-  opts?: { totalBudgetMs?: number },
+  opts?: { totalBudgetMs?: number; clock?: RetryClock },
 ): Promise<VerifiedTransfer | null> {
   const recipientWallet = config.wallets.sol;
   if (!recipientWallet) {
@@ -488,7 +501,7 @@ export async function verifySolTransfer(
         },
       ],
     }),
-  }, { totalBudgetMs: opts?.totalBudgetMs, chainId: "sol" });
+  }, { totalBudgetMs: opts?.totalBudgetMs, chainId: "sol", clock: opts?.clock });
 
   if (!resp.ok) {
     throw new Error(`Solana RPC error: ${resp.status} ${resp.statusText}`);
@@ -657,7 +670,7 @@ export async function verifyTransfer(
   txHash: string,
   chainId: ChainId,
   config: Config,
-  opts?: { totalBudgetMs?: number },
+  opts?: { totalBudgetMs?: number; clock?: RetryClock },
 ): Promise<VerifyResult> {
   switch (chainId) {
     case "base":

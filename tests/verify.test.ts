@@ -1,5 +1,33 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { resolveplan } from "../src/verify.js";
+// Static import: vi.mock is hoisted above this, so viem is already mocked.
+// (A per-test dynamic import charged the ~1s viem load to each test timeout.)
+import {
+  fetchWithRetry,
+  TransientVerificationError,
+  verifyEvmTransfer,
+  verifySolTransfer,
+  verifyTonTransfer,
+  verifyTransfer,
+  withRpcFailover,
+  type RetryClock,
+} from "../src/verify.js";
+
+/**
+ * Virtual clock for retry/backoff tests: sleep() advances virtual time and
+ * yields a microtask instead of waiting on a real timer, and random() is
+ * deterministic. Keeps retry tests independent of host CPU load.
+ */
+function fakeClock(): RetryClock {
+  let t = 0;
+  return {
+    now: () => t,
+    async sleep(ms: number) {
+      t += ms;
+      await Promise.resolve();
+    },
+    random: () => 0.5,
+  };
+}
 
 // ── resolveplan tests are in payments.test.ts already, but let's add
 //    chain-specific verification tests with mocked fetch/viem ──
@@ -39,7 +67,6 @@ describe("verifyEvmTransfer", () => {
       logs: [],
     });
 
-    const { verifyEvmTransfer } = await import("../src/verify.js");
     const config = makeConfig();
     const result = await verifyEvmTransfer("0xabc", "base", config);
     expect(result).toBeNull();
@@ -58,13 +85,16 @@ describe("verifyEvmTransfer", () => {
         logs: [],
       });
 
-    const { verifyEvmTransfer } = await import("../src/verify.js");
     const config = makeConfig();
-    const result = await verifyEvmTransfer("0xabc", "base", config);
+    const clock = fakeClock();
+    const result = await verifyEvmTransfer("0xabc", "base", config, { clock });
     // No matching Transfer log in the (eventually real) receipt => null, but
     // critically we got there via retry, not an immediate short-circuit.
     expect(result).toBeNull();
     expect(mockGetTransactionReceipt).toHaveBeenCalledTimes(3);
+    // verifyEvmTransfer must forward opts.clock into withRpcFailover: the two
+    // in-endpoint backoffs (300ms + 600ms) land on the virtual clock.
+    expect(clock.now()).toBe(900);
   });
 
   it("returns null when no matching Transfer log", async () => {
@@ -84,7 +114,6 @@ describe("verifyEvmTransfer", () => {
       ],
     });
 
-    const { verifyEvmTransfer } = await import("../src/verify.js");
     const config = makeConfig();
     const result = await verifyEvmTransfer("0xabc", "base", config);
     expect(result).toBeNull();
@@ -113,7 +142,6 @@ describe("verifyEvmTransfer", () => {
       ],
     });
 
-    const { verifyEvmTransfer } = await import("../src/verify.js");
     const config = makeConfig({ base: ourWallet });
     const result = await verifyEvmTransfer("0xtxhash", "base", config);
 
@@ -146,7 +174,6 @@ describe("verifyEvmTransfer", () => {
       ],
     });
 
-    const { verifyEvmTransfer } = await import("../src/verify.js");
     const config = makeConfig({ base_sepolia: ourWallet });
     const result = await verifyEvmTransfer("0xsepoliatx", "base_sepolia", config);
 
@@ -178,7 +205,6 @@ describe("verifyTonTransfer", () => {
       new Response(JSON.stringify({ jetton_transfers: [] }), { status: 200 }),
     );
 
-    const { verifyTonTransfer } = await import("../src/verify.js");
     const config = makeConfig();
     const result = await verifyTonTransfer("tonhash123", config);
     expect(result).toBeNull();
@@ -220,7 +246,6 @@ describe("verifyTonTransfer", () => {
       ),
     );
 
-    const { verifyTonTransfer } = await import("../src/verify.js");
     const config = makeConfig({ ton: ourWallet });
     const result = await verifyTonTransfer("tonhash", config);
 
@@ -248,13 +273,13 @@ describe("verifyTonTransfer", () => {
     // this must keep answering 500 across every attempt, not just once.
     mockFetch.mockResolvedValue(new Response("Internal Server Error", { status: 500 }));
 
-    const { verifyTonTransfer, TransientVerificationError } = await import("../src/verify.js");
     const config = makeConfig();
     // Still a loud failure (never silently returns null) — now surfaced as a
     // TransientVerificationError after bounded retry, not an immediate throw.
+    const clock = fakeClock();
     let caught: unknown;
     try {
-      await verifyTonTransfer("tonhash", config);
+      await verifyTonTransfer("tonhash", config, { clock });
     } catch (err) {
       caught = err;
     }
@@ -283,7 +308,6 @@ describe("verifySolTransfer", () => {
       ),
     );
 
-    const { verifySolTransfer } = await import("../src/verify.js");
     const config = makeConfig();
     const result = await verifySolTransfer("solhash", config);
     expect(result).toBeNull();
@@ -309,7 +333,6 @@ describe("verifySolTransfer", () => {
       ),
     );
 
-    const { verifySolTransfer } = await import("../src/verify.js");
     const config = makeConfig();
     const result = await verifySolTransfer("solhash", config);
     expect(result).toBeNull();
@@ -368,7 +391,6 @@ describe("verifySolTransfer", () => {
       ),
     );
 
-    const { verifySolTransfer } = await import("../src/verify.js");
     const config = makeConfig({ sol: ourWallet });
     const result = await verifySolTransfer("solhash", config);
 
@@ -382,7 +404,6 @@ describe("verifySolTransfer", () => {
 
 describe("verifyTransfer dispatcher", () => {
   it("throws for unsupported chain", async () => {
-    const { verifyTransfer } = await import("../src/verify.js");
     const config = makeConfig();
     await expect(
       verifyTransfer("0x123", "xyz" as any, config),
@@ -394,25 +415,25 @@ describe("verifyTransfer dispatcher", () => {
 
 describe("withRpcFailover", () => {
   it("retries the same endpoint on a transient error, then succeeds", async () => {
-    const { withRpcFailover } = await import("../src/verify.js");
+    const clock = fakeClock();
     let calls = 0;
     const result = await withRpcFailover(["https://a"], async (url) => {
       calls++;
       if (calls < 2) throw new Error("ETIMEDOUT");
       return `ok:${url}`;
-    });
+    }, { clock });
     expect(result).toBe("ok:https://a");
     expect(calls).toBe(2);
   });
 
   it("fails over to the next endpoint once the first is exhausted", async () => {
-    const { withRpcFailover } = await import("../src/verify.js");
+    const clock = fakeClock();
     const attempted: string[] = [];
     const result = await withRpcFailover(["https://a", "https://b"], async (url) => {
       attempted.push(url);
       if (url === "https://a") throw new Error("fetch failed: connect ETIMEDOUT");
       return `ok:${url}`;
-    });
+    }, { clock });
     expect(result).toBe("ok:https://b");
     // 3 attempts against "a" (all transient) before failing over to "b".
     expect(attempted.filter((u) => u === "https://a").length).toBe(3);
@@ -420,32 +441,70 @@ describe("withRpcFailover", () => {
   });
 
   it("rethrows a non-transient error immediately — no retry, no failover", async () => {
-    const { withRpcFailover } = await import("../src/verify.js");
+    const clock = fakeClock();
     let calls = 0;
     await expect(
       withRpcFailover(["https://a", "https://b"], async () => {
         calls++;
         throw new Error("No wallet configured for chain eth");
-      }),
+      }, { clock }),
     ).rejects.toThrow("No wallet configured");
     expect(calls).toBe(1);
+    expect(clock.now()).toBe(0); // no backoff slept
   });
 
   it("throws TransientVerificationError (never a bare Error) once every endpoint is exhausted", async () => {
-    const { withRpcFailover, TransientVerificationError } = await import("../src/verify.js");
+    const clock = fakeClock();
     await expect(
       withRpcFailover(["https://a", "https://b"], async () => {
         throw new Error("network timeout");
-      }),
+      }, { clock }),
     ).rejects.toBeInstanceOf(TransientVerificationError);
+    // Single pass: 300ms + 600ms in-endpoint backoff per endpoint, no sweep.
+    expect(clock.now()).toBe(1_800);
+  });
+
+  it("retry path performs no real waiting when a clock is injected", async () => {
+    // Deterministic guard: pass-through spies prove the retry path never
+    // touches the real timer/clock/RNG when a clock is injected. A wall-clock
+    // threshold alone is flaky under CPU load, so it is only a loose sanity
+    // bound here (a real-sleep regression would take >= 90s).
+    const clock = fakeClock();
+    // Silence the [RPC-RETRY]/[RPC-SWEEP] logs: vitest's console capture
+    // calls Date.now() once per logged line (to timestamp it), which is
+    // test-harness noise, not the retry path reading the real clock.
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const st = vi.spyOn(globalThis, "setTimeout");
+    const dn = vi.spyOn(Date, "now");
+    const mr = vi.spyOn(Math, "random");
+    try {
+      const w0 = performance.now();
+      const v0 = clock.now();
+      await expect(
+        withRpcFailover(["https://a", "https://b"], async () => {
+          throw new Error("ETIMEDOUT");
+        }, { totalBudgetMs: 90_000, clock }),
+      ).rejects.toThrow(TransientVerificationError);
+      expect(st).not.toHaveBeenCalled();
+      expect(dn).not.toHaveBeenCalled();
+      expect(mr).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalled(); // the retry/sweep path actually ran
+      expect(clock.now() - v0).toBeGreaterThanOrEqual(90_000);
+      expect(performance.now() - w0).toBeLessThan(10_000);
+    } finally {
+      st.mockRestore();
+      dn.mockRestore();
+      mr.mockRestore();
+      log.mockRestore();
+    }
   });
 
   it("fetchWithRetry retries a transient 5xx on the same URL before succeeding", async () => {
-    const { fetchWithRetry } = await import("../src/verify.js");
     const mockFetch = vi.mocked(fetch);
     mockFetch.mockResolvedValueOnce(new Response("boom", { status: 503 }));
     mockFetch.mockResolvedValueOnce(new Response("ok", { status: 200 }));
-    const resp = await fetchWithRetry("https://ton.example/api");
+    const clock = fakeClock();
+    const resp = await fetchWithRetry("https://ton.example/api", undefined, { clock });
     expect(resp.status).toBe(200);
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
@@ -456,7 +515,7 @@ describe("withRpcFailover", () => {
 
 describe("withRpcFailover sweep layer (opts.totalBudgetMs)", () => {
   it("survives N consecutive full-pass transient failures then succeeds on a later sweep", async () => {
-    const { withRpcFailover } = await import("../src/verify.js");
+    const clock = fakeClock();
     let calls = 0;
     // 2 endpoints x 3 attempts = 6 transient failures burns through the
     // first full pass entirely; succeed only once we reach the second sweep.
@@ -468,17 +527,20 @@ describe("withRpcFailover sweep layer (opts.totalBudgetMs)", () => {
         if (calls <= FAILURES_BEFORE_SUCCESS) throw new Error("ETIMEDOUT");
         return `ok:${url}:${calls}`;
       },
-      { totalBudgetMs: 20_000, chainId: "base" },
+      { totalBudgetMs: 20_000, chainId: "base", clock },
     );
     expect(result).toBe(`ok:https://a:${FAILURES_BEFORE_SUCCESS + 1}`);
     // Proves a full first pass (6 calls) was exhausted and a second sweep
     // actually re-tried the list from the top (call #7 succeeding on "a"
     // again, not just retried within one endpoint).
     expect(calls).toBe(FAILURES_BEFORE_SUCCESS + 1);
-  }, 15_000);
+    // Virtual time: full first pass (2 x (300 + 600)ms) + one jittered sweep
+    // delay (0.5 x 250ms cap) + one 300ms in-endpoint retry on sweep 2.
+    expect(clock.now()).toBe(2_225);
+  });
 
   it("logs an [RPC-SWEEP] line with an observed delay before re-sweeping", async () => {
-    const { withRpcFailover } = await import("../src/verify.js");
+    const clock = fakeClock();
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     let calls = 0;
     await withRpcFailover(
@@ -488,7 +550,7 @@ describe("withRpcFailover sweep layer (opts.totalBudgetMs)", () => {
         if (calls <= 3) throw new Error("ETIMEDOUT"); // exhausts the one endpoint's pass
         return "ok";
       },
-      { totalBudgetMs: 15_000, chainId: "eth" },
+      { totalBudgetMs: 15_000, chainId: "eth", clock },
     );
     const sweepLines = logSpy.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("[RPC-SWEEP]"));
     expect(sweepLines.length).toBeGreaterThanOrEqual(1);
@@ -500,28 +562,27 @@ describe("withRpcFailover sweep layer (opts.totalBudgetMs)", () => {
     expect(observedDelay).toBeGreaterThanOrEqual(0);
     expect(observedDelay).toBeLessThanOrEqual(250);
     logSpy.mockRestore();
-  }, 15_000);
+  });
 
   it("without opts.totalBudgetMs, throws after ONE pass — no sweep budget burned", async () => {
-    const { withRpcFailover, TransientVerificationError } = await import("../src/verify.js");
+    const clock = fakeClock();
     let calls = 0;
-    const startedAt = Date.now();
     await expect(
       withRpcFailover(["https://a"], async () => {
         calls++;
         throw new Error("ETIMEDOUT");
-      }),
+      }, { clock }),
     ).rejects.toBeInstanceOf(TransientVerificationError);
     // 3 attempts against the single endpoint, no re-sweep — pre-AGE-970
     // behavior preserved exactly for callers that don't opt in.
     expect(calls).toBe(3);
-    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    // Only the in-endpoint backoff (300ms + 600ms) — no sweep delay.
+    expect(clock.now()).toBe(900);
   });
 
   it("a genuine non-transient error (tx not found) short-circuits immediately — never burns sweep budget", async () => {
-    const { withRpcFailover } = await import("../src/verify.js");
+    const clock = fakeClock();
     let calls = 0;
-    const startedAt = Date.now();
     await expect(
       withRpcFailover(
         ["https://a", "https://b"],
@@ -529,11 +590,11 @@ describe("withRpcFailover sweep layer (opts.totalBudgetMs)", () => {
           calls++;
           throw new Error("Transaction receipt with hash ... could not be found");
         },
-        { totalBudgetMs: 90_000, chainId: "base" }, // cron-sized budget — must NOT be consumed
+        { totalBudgetMs: 90_000, chainId: "base", clock }, // cron-sized budget — must NOT be consumed
       ),
     ).rejects.toThrow(/could not be found/);
     expect(calls).toBe(1); // no retry, no failover, no sweep
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(clock.now()).toBe(0); // zero budget consumed
   });
 });
 
