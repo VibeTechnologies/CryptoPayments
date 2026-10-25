@@ -1,0 +1,1 @@
+Task is done when **user opens `https://pay.agentlabs.cc/pay?plan=starter&uid=123456&idtype=tg&test=true` in browser, clicks the Base icon button** and the result is **`keys.coinbase.com` opens showing a QR code the user can scan with Coinbase Wallet mobile app, without "no valid asset found" error**, verified by screenshot of keys.coinbase.com showing QR code content.
