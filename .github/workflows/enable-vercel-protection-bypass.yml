@@ -1,0 +1,478 @@
+name: Enable Vercel Protection Bypass for AgentPod (one-off, #6072)
+
+# One-off for AgentPod #6072 Group 3 (route C): create a Vercel Protection
+# Bypass for Automation secret on the pay.vibebrowser.app project and land
+# it in VibeTechnologies/AgentPod as the Actions secret
+# VERCEL_PROTECTION_BYPASS. AgentPod PR #6143 already wires deploy.yml's
+# post-deploy SPA tests to send header `x-vercel-protection-bypass` from
+# env VERCEL_PROTECTION_BYPASS <- that repo secret; it is inert until the
+# secret exists. The tests currently hit Vercel's
+# /.well-known/vercel/security/request-challenge (403) on rapid loads.
+#
+# Vercel endpoints (verified against vercel.com/docs/rest-api, 2026-11-14):
+#   GET   /v9/projects/{idOrName}?teamId=$VERCEL_ORG_ID
+#         -> project object; `protectionBypass` is an OBJECT MAP KEYED BY
+#            THE SECRET VALUES THEMSELVES (values carry createdAt /
+#            createdBy / scope). The raw project JSON is therefore a
+#            secret-bearing document and is NEVER printed here.
+#         -> `ssoProtection.deploymentType` is the deployment-protection
+#            level.
+#   PATCH /v1/projects/{idOrName}/protection-bypass?teamId=$VERCEL_ORG_ID
+#         body {"generate": {"note": "..."}} creates a new bypass secret;
+#         the response is the updated protectionBypass map (same shape).
+#   GET   /v1/security/firewall/config?projectId=..&teamId=..
+#         read-only WAF/bot-protection probe (best effort, non-fatal).
+#
+# Cross-repo store — read this before dispatching:
+# The #6138 transport (transport-crypto-secrets-to-agentpod.yml in this
+# repo) has NO credential that can write into AgentPod: GitHub Actions
+# secrets are write-only and its GITHUB_TOKEN is scoped to this repo, so
+# #6138 seals values with the AgentPod Actions-secrets public key
+# (libsodium sealed box, PyNaCl — dispatch inputs, public material only),
+# uploads the sealed blobs as a run artifact, and the task lead PUTs them.
+# This workflow therefore supports two store paths, in order:
+#   1. DIRECT (preferred): if this repo holds a secret
+#      AGENTPOD_SECRETS_TOKEN (a token with write access to
+#      VibeTechnologies/AgentPod Actions secrets AND environment secrets),
+#      the workflow GETs the AgentPod public key(s) itself, seals with the
+#      same PyNaCl SealedBox code as #6138, and PUTs:
+#        repo secret VERCEL_PROTECTION_BYPASS, or — if that PUT returns
+#        HTTP 400 (AgentPod repo secrets are at the 100-secret cap, seen
+#        during #6138) — the ENVIRONMENT secret of the same name in
+#        AgentPod environment `crypto-payments-secret`.
+#      It then verifies by listing secret NAMES only.
+#   2. SEALED FALLBACK (exact #6138 mechanism): if AGENTPOD_SECRETS_TOKEN
+#      is absent — or the direct path fails — the value is sealed with the
+#      AgentPod public key(s) passed as dispatch inputs and uploaded as a
+#      short-lived artifact (`sealed-vercel-protection-bypass`); the lead
+#      downloads it and PUTs the sealed blob (repo blob first; the
+#      environment blob if the repo PUT hits the cap). Plaintext never
+#      leaves the runner outside the step env / a chmod-600 temp file
+#      that the final cleanup step deletes.
+# Provide BOTH the token and the sealed-fallback public-key inputs at
+# dispatch time as insurance: a created bypass value is unrecoverable
+# once this run ends without a store.
+#
+# No-print discipline: the bypass value is add-mask'ed in the step that
+# creates it (and re-masked in the store step), never echoed, never
+# written to a repo file, and Vercel/GitHub error bodies are printed ONLY
+# as HTTP status + whitelisted error.code / error.message fields.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "enable-bypass" to create the Vercel protection bypass and store it in AgentPod'
+        required: true
+        type: string
+        default: ""
+      agentpod_public_key:
+        description: "Optional (sealed fallback): base64 libsodium public key of VibeTechnologies/AgentPod repo Actions secrets"
+        required: false
+        type: string
+        default: ""
+      agentpod_key_id:
+        description: "Optional (sealed fallback): key id of the AgentPod repo Actions-secrets public key"
+        required: false
+        type: string
+        default: ""
+      agentpod_env_public_key:
+        description: "Optional (sealed fallback): base64 libsodium public key of AgentPod environment crypto-payments-secret secrets"
+        required: false
+        type: string
+        default: ""
+      agentpod_env_key_id:
+        description: "Optional (sealed fallback): key id of the AgentPod environment crypto-payments-secret public key"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: enable-vercel-protection-bypass
+  cancel-in-progress: false
+
+jobs:
+  enable-bypass:
+    name: Enable Vercel Protection Bypass for AgentPod (one-off, #6072)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm == 'enable-bypass'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - name: Validate confirmation input
+        env:
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "${CONFIRM}" != "enable-bypass" ]; then
+            echo "::error::Refusing to run: type 'enable-bypass' in the confirm input to proceed."
+            exit 1
+          fi
+          echo "Confirmation accepted."
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyNaCl
+        run: pip install pynacl
+
+      - name: Probe Vercel project (state only, raw JSON never printed)
+        id: probe
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          token = os.environ.get("VERCEL_TOKEN", "")
+          team = os.environ.get("VERCEL_ORG_ID", "")
+          project_id = os.environ.get("VERCEL_PROJECT_ID", "")
+          for name, val in (("VERCEL_TOKEN", token), ("VERCEL_ORG_ID", team),
+                            ("VERCEL_PROJECT_ID", project_id)):
+              if not val:
+                  print(f"::error::Missing required secret: {name}", file=sys.stderr)
+                  sys.exit(1)
+
+          url = f"https://api.vercel.com/v9/projects/{project_id}?teamId={team}"
+          req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+          try:
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  data = json.loads(resp.read().decode("utf-8"))
+          except urllib.error.HTTPError as e:
+              err = {}
+              try:
+                  err = (json.loads(e.read().decode("utf-8")) or {}).get("error") or {}
+              except Exception:
+                  pass
+              print(f"vercel_project_get_status={e.code}")
+              print(f"vercel_error_code={err.get('code')}")
+              print(f"vercel_error_message={err.get('message')}")
+              print("::error::GET Vercel project failed (see status/code above).", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"project_id_match={str(data.get('id') == project_id).lower()}")
+          if data.get("id") != project_id:
+              print("::error::Vercel project id in response does not match VERCEL_PROJECT_ID.", file=sys.stderr)
+              sys.exit(1)
+          print(f"project_name={data.get('name')}")
+
+          sso = data.get("ssoProtection") or {}
+          print(f"deployment_protection={sso.get('deploymentType') or 'none'}")
+
+          # protectionBypass is a map KEYED BY THE SECRET VALUES. Mask every
+          # key immediately; print only presence, count, createdAt, scope.
+          bypass = data.get("protectionBypass") or {}
+          for secret_value in bypass:
+              print(f"::add-mask::{secret_value}")
+          entries = sorted(bypass.values(), key=lambda v: str(v.get("createdAt")))
+          print(f"protection_bypass_present={str(bool(bypass)).lower()}")
+          print(f"protection_bypass_count={len(bypass)}")
+          for entry in entries:
+              print(f"protection_bypass_entry=createdAt:{entry.get('createdAt')} scope:{entry.get('scope')}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"bypass_present={str(bool(bypass)).lower()}\n")
+          PY
+
+      - name: Probe Vercel firewall config (read-only, best effort)
+        run: |
+          python3 - <<'PY' || true
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          token = os.environ["VERCEL_TOKEN"]
+          team = os.environ["VERCEL_ORG_ID"]
+          project_id = os.environ["VERCEL_PROJECT_ID"]
+          url = ("https://api.vercel.com/v1/security/firewall/config"
+                 f"?projectId={project_id}&teamId={team}")
+          req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+          try:
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  data = json.loads(resp.read().decode("utf-8"))
+          except urllib.error.HTTPError as e:
+              print(f"firewall_config_status={e.code} (no active config read; non-fatal)")
+              raise SystemExit(0)
+          active = data.get("active") or {}
+          managed = active.get("managedRules") or {}
+          bot = managed.get("bot_protection") or {}
+          print(f"firewall_enabled={active.get('firewallEnabled')}")
+          print(f"firewall_bot_protection_active={bot.get('active')}")
+          print(f"firewall_bot_protection_action={bot.get('action')}")
+          print(f"firewall_custom_rules={len(active.get('rules') or [])}")
+          print(f"firewall_managed_groups={','.join(sorted(managed.keys()))}")
+          PY
+
+      - name: Stop if a bypass already exists (lead decides rotation)
+        if: steps.probe.outputs.bypass_present == 'true'
+        run: |
+          echo "bypass_status=already-exists"
+          echo "::error::A Protection Bypass for Automation secret already exists on this project. Its value is unrecoverable, and creating/regenerating could break anything already using it. Stopping BEFORE creation; the task lead decides whether to rotate."
+          exit 78
+
+      - name: Create Protection Bypass for Automation secret
+        id: create
+        if: steps.probe.outputs.bypass_present == 'false'
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          token = os.environ["VERCEL_TOKEN"]
+          team = os.environ["VERCEL_ORG_ID"]
+          project_id = os.environ["VERCEL_PROJECT_ID"]
+
+          url = (f"https://api.vercel.com/v1/projects/{project_id}"
+                 f"/protection-bypass?teamId={team}")
+          body = json.dumps({"generate": {"note": "AgentPod #6072 post-deploy SPA tests"}}).encode("utf-8")
+          req = urllib.request.Request(url, data=body, method="PATCH", headers={
+              "Authorization": f"Bearer {token}",
+              "Content-Type": "application/json",
+          })
+          try:
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  data = json.loads(resp.read().decode("utf-8"))
+          except urllib.error.HTTPError as e:
+              err = {}
+              try:
+                  err = (json.loads(e.read().decode("utf-8")) or {}).get("error") or {}
+              except Exception:
+                  pass
+              print(f"vercel_bypass_create_status={e.code}")
+              print(f"vercel_error_code={err.get('code')}")
+              print(f"vercel_error_message={err.get('message')}")
+              print("::error::PATCH protection-bypass failed (see status/code above).", file=sys.stderr)
+              sys.exit(1)
+
+          # Response protectionBypass map is keyed by the secret values;
+          # the probe proved the map was empty before, so its keys are new.
+          bypass = data.get("protectionBypass") or {}
+          keys = sorted(bypass.keys())
+          for secret_value in keys:
+              print(f"::add-mask::{secret_value}")
+          if len(keys) != 1:
+              print(f"protection_bypass_count_after={len(keys)}")
+              print("::error::Expected exactly one new bypass secret in the PATCH response.", file=sys.stderr)
+              sys.exit(1)
+          value = keys[0]
+          entry = bypass[value] or {}
+
+          tmpdir = os.environ.get("RUNNER_TEMP") or "/tmp"
+          value_path = os.path.join(tmpdir, "vercel-bypass-value")
+          fd = os.open(value_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+          with os.fdopen(fd, "w", encoding="utf-8") as fh:
+              fh.write(value)
+
+          fingerprint = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+          print("bypass_created=true")
+          print(f"bypass_created_at={entry.get('createdAt')}")
+          print(f"bypass_scope={entry.get('scope')}")
+          print(f"bypass_fingerprint_sha256_12={fingerprint} len={len(value)}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("created=true\n")
+          PY
+
+      - name: Store bypass in AgentPod (direct PUT, else sealed fallback)
+        id: store
+        if: steps.create.outputs.created == 'true'
+        env:
+          AGENTPOD_SECRETS_TOKEN: ${{ secrets.AGENTPOD_SECRETS_TOKEN }}
+          AGENTPOD_PUBLIC_KEY: ${{ inputs.agentpod_public_key }}
+          AGENTPOD_KEY_ID: ${{ inputs.agentpod_key_id }}
+          AGENTPOD_ENV_PUBLIC_KEY: ${{ inputs.agentpod_env_public_key }}
+          AGENTPOD_ENV_KEY_ID: ${{ inputs.agentpod_env_key_id }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          from nacl.public import PublicKey, SealedBox
+
+          OWNER_REPO = "VibeTechnologies/AgentPod"
+          ENV_NAME = "crypto-payments-secret"
+          SECRET_NAME = "VERCEL_PROTECTION_BYPASS"
+
+          tmpdir = os.environ.get("RUNNER_TEMP") or "/tmp"
+          with open(os.path.join(tmpdir, "vercel-bypass-value"), encoding="utf-8") as fh:
+              value = fh.read().strip()
+          if not value:
+              print("::error::Bypass value temp file is empty.", file=sys.stderr)
+              sys.exit(1)
+          print(f"::add-mask::{value}")
+
+          def out(**kv):
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  for k, v in kv.items():
+                      fh.write(f"{k}={v}\n")
+
+          def seal(public_key_b64, plaintext):
+              box = SealedBox(PublicKey(base64.b64decode(public_key_b64)))
+              return base64.b64encode(box.encrypt(plaintext.encode("utf-8"))).decode("ascii")
+
+          def gh(method, path, token, body=None):
+              data = json.dumps(body).encode("utf-8") if body is not None else None
+              req = urllib.request.Request(
+                  "https://api.github.com" + path, data=data, method=method,
+                  headers={"Accept": "application/vnd.github+json",
+                           "X-GitHub-Api-Version": "2022-11-28",
+                           "Authorization": f"Bearer {token}"})
+              if data is not None:
+                  req.add_header("Content-Type", "application/json")
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as resp:
+                      raw = resp.read().decode("utf-8")
+                      return resp.status, (json.loads(raw) if raw else {})
+              except urllib.error.HTTPError as e:
+                  raw = e.read().decode("utf-8")
+                  try:
+                      payload = json.loads(raw) if raw else {}
+                  except Exception:
+                      payload = {}
+                  return e.code, payload
+
+          def sealed_fallback(reason):
+              repo_key = os.environ.get("AGENTPOD_PUBLIC_KEY", "")
+              repo_key_id = os.environ.get("AGENTPOD_KEY_ID", "")
+              if not repo_key or not repo_key_id:
+                  print(f"::error::Store failed ({reason}) and sealed fallback is unavailable: agentpod_public_key / agentpod_key_id inputs were not provided.", file=sys.stderr)
+                  sys.exit(1)
+              sealed_dir = os.path.join(tmpdir, "sealed-vercel-bypass")
+              os.makedirs(sealed_dir, exist_ok=True)
+              repo_payload = {"key_id": repo_key_id,
+                              "secrets": {SECRET_NAME: seal(repo_key, value)}}
+              with open(os.path.join(sealed_dir, "sealed-repo.json"), "w", encoding="utf-8") as fh:
+                  json.dump(repo_payload, fh)
+              print(f"{SECRET_NAME}: sealed (repo scope)")
+              env_key = os.environ.get("AGENTPOD_ENV_PUBLIC_KEY", "")
+              env_key_id = os.environ.get("AGENTPOD_ENV_KEY_ID", "")
+              if env_key and env_key_id:
+                  env_payload = {"key_id": env_key_id,
+                                 "secrets": {SECRET_NAME: seal(env_key, value)}}
+                  with open(os.path.join(sealed_dir, "sealed-env.json"), "w", encoding="utf-8") as fh:
+                      json.dump(env_payload, fh)
+                  print(f"{SECRET_NAME}: sealed (environment scope)")
+              else:
+                  print("sealed_env=skipped (env public-key inputs not provided)")
+              print(f"store_path=sealed-artifact reason={reason}")
+              out(stored="sealed-artifact", verified="false")
+
+          token = os.environ.get("AGENTPOD_SECRETS_TOKEN", "")
+          if not token:
+              sealed_fallback("no AGENTPOD_SECRETS_TOKEN secret in this repo")
+              sys.exit(0)
+
+          # --- Direct path: repo secret first (same sealed-box flow). ---
+          status, key_payload = gh("GET", f"/repos/{OWNER_REPO}/actions/secrets/public-key", token)
+          if status != 200:
+              print(f"agentpod_repo_public_key_status={status} message={key_payload.get('message')}")
+              sealed_fallback("agentpod repo public-key GET failed")
+              sys.exit(0)
+          put_body = {"encrypted_value": seal(key_payload["key"], value),
+                      "key_id": key_payload["key_id"]}
+          status, payload = gh("PUT", f"/repos/{OWNER_REPO}/actions/secrets/{SECRET_NAME}", token, put_body)
+          print(f"agentpod_repo_secret_put_status={status}")
+          stored = None
+          list_path = None
+          if status in (201, 204):
+              stored, list_path = "repo", f"/repos/{OWNER_REPO}/actions/secrets?per_page=100"
+          elif status == 400:
+              # Repo-secrets cap (AgentPod is at 100) — environment fallback.
+              print("repo_secret_put_400=true (falling back to environment secret)")
+              status_env, env_payload = gh("GET", f"/repos/{OWNER_REPO}/environments/{ENV_NAME}", token)
+              if status_env == 200:
+                  rules = env_payload.get("protection_rules") or []
+                  reviewers = any(r.get("type") == "required_reviewers" for r in rules)
+                  print(f"environment_protection_rules={len(rules)} required_reviewers={str(reviewers).lower()}")
+                  print(f"environment_can_admins_bypass={env_payload.get('can_admins_bypass')}")
+              else:
+                  print(f"environment_get_status={status_env} (non-fatal)")
+              status_key, env_key_payload = gh(
+                  "GET", f"/repos/{OWNER_REPO}/environments/{ENV_NAME}/secrets/public-key", token)
+              if status_key != 200:
+                  print(f"agentpod_env_public_key_status={status_key} message={env_key_payload.get('message')}")
+                  sealed_fallback("agentpod env public-key GET failed")
+                  sys.exit(0)
+              env_put_body = {"encrypted_value": seal(env_key_payload["key"], value),
+                              "key_id": env_key_payload["key_id"]}
+              status_put, put_payload = gh(
+                  "PUT", f"/repos/{OWNER_REPO}/environments/{ENV_NAME}/secrets/{SECRET_NAME}",
+                  token, env_put_body)
+              print(f"agentpod_env_secret_put_status={status_put}")
+              if status_put in (201, 204):
+                  stored = "environment"
+                  list_path = f"/repos/{OWNER_REPO}/environments/{ENV_NAME}/secrets?per_page=100"
+              else:
+                  print(f"agentpod_env_secret_put_message={put_payload.get('message')}")
+                  sealed_fallback("agentpod env secret PUT failed")
+                  sys.exit(0)
+          else:
+              print(f"agentpod_repo_secret_put_message={payload.get('message')}")
+              sealed_fallback(f"agentpod repo secret PUT status {status}")
+              sys.exit(0)
+
+          # --- Verify by listing names only. ---
+          status_list, listing = gh("GET", list_path, token)
+          found = None
+          if status_list == 200:
+              for item in listing.get("secrets") or []:
+                  if item.get("name") == SECRET_NAME:
+                      found = item
+          if not found:
+              print(f"verify_list_status={status_list}")
+              print("::error::VERCEL_PROTECTION_BYPASS not found in the post-PUT secret name listing.", file=sys.stderr)
+              sys.exit(1)
+          print(f"verified_secret_name={found['name']} updated_at={found.get('updated_at')}")
+          out(stored=stored, verified="true")
+          PY
+
+      - name: Upload sealed bypass artifact (fallback path only)
+        if: steps.store.outputs.stored == 'sealed-artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-vercel-protection-bypass
+          path: ${{ runner.temp }}/sealed-vercel-bypass/
+          retention-days: 1
+
+      - name: Final status
+        if: steps.create.outputs.created == 'true'
+        env:
+          STORED: ${{ steps.store.outputs.stored }}
+          VERIFIED: ${{ steps.store.outputs.verified }}
+        run: |
+          echo "bypass_created=true stored=${STORED} verified=${VERIFIED}"
+          {
+            echo "### Vercel Protection Bypass (#6072)"
+            echo "- bypass_created=true"
+            echo "- stored=${STORED}"
+            echo "- verified=${VERIFIED}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Cleanup bypass value from runner temp
+        if: always()
+        run: |
+          rm -rf "${RUNNER_TEMP}/vercel-bypass-value" "${RUNNER_TEMP}/sealed-vercel-bypass" || true
+          echo "cleanup_done=true"
