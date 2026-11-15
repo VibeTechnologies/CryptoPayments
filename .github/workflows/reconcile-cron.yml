@@ -7,6 +7,13 @@ name: Reconcile pending crypto payments (AGE-960 / GH#49)
 # settle without depending on the client to come back. Idempotent by design
 # (see finalizeVerifiedPayment's guard in src/server.ts) — safe to run
 # concurrently with itself or with a client's own lazy re-verify.
+#
+# AGE-994: the same call also re-examines terminal `failed` rows that carry a
+# well-formed tx_hash. A payment can be marked failed in error (or its
+# transfer can confirm on-chain only after the mark); previously nothing ever
+# looked at such a row again short of a manual DB reset (AGE-986). Recovery
+# only ever happens on a CONFIRMED chain result, through the same idempotent
+# finalizeVerifiedPayment guard.
 
 on:
   schedule:

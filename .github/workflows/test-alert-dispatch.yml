@@ -1,0 +1,31 @@
+name: TEMP - AGE-971 alert verify
+on:
+  workflow_dispatch:
+    inputs:
+      bad_sha:
+        description: 'commit sha to attribute the fake alert to'
+        required: true
+        default: 'HEAD'
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+jobs:
+  verify-alert:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BAD_SHA: ${{ github.event.inputs.bad_sha }}
+      RUN_URL: https://github.com/VibeTechnologies/CryptoPayments/actions/runs/TEST-AGE971
+      RUN_ID: 999999999
+      TG_TOKEN: ${{ secrets.CI_NOTIFY_BOT_TOKEN }}
+      TG_ADMINS: ${{ secrets.ADMIN_TELEGRAM_IDS }}
+      SENTRY_DSN: ${{ secrets.SENTRY_CI_DSN }}
+      SENTRY_CI_DEDUP_STATE: .sentry-ci-dedup.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run alert-red-main.sh directly (AGE-971 E2E verify, NOT a real red main)
+        run: bash .github/scripts/alert-red-main.sh
