@@ -63,7 +63,7 @@ const mockConfig = {
     base_sepolia: "0xSepoliaWallet",
     eth_sepolia: "0xEthSepoliaWallet",
   },
-  prices: { starter: 10, pro: 25, max: 100 },
+  prices: { byok: 5, starter: 5, pro: 25, max: 100 },
   tokens: {
     base: { usdc: "0xBaseUSDC", usdt: "0xBaseUSDT" },
     eth: { usdc: "0xEthUSDC", usdt: "0xEthUSDT" },
